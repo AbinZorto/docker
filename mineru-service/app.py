@@ -169,24 +169,24 @@ class MinerUProcessor:
             raise HTTPException(status_code=503, detail="MinerU not available")
         
         try:
-            # Initialize MinerU components
-            parser = PdfParser()
-            layout_analyzer = LayoutAnalyzer() if options.layoutAnalysis else None
-            structure_analyzer = StructureAnalyzer()
-            
             logger.info(f"Processing PDF: {pdf_path}")
             
-            # Parse PDF
-            document = await asyncio.to_thread(parser.parse, pdf_path)
-            if not document:
-                raise ValueError("Failed to parse PDF document")
+            # Choose appropriate MinerU pipe based on method
+            if options.method == "ocr" or options.enableOCR:
+                pipe = OCRPipe()
+            elif options.method == "txt":
+                pipe = TXTpipe()
+            else:
+                pipe = UNIPipe()
             
-            # Layout analysis
-            if layout_analyzer and options.layoutAnalysis:
-                document = await asyncio.to_thread(layout_analyzer.analyze, document)
+            # Process PDF using MinerU
+            result = await asyncio.to_thread(pipe.process, pdf_path)
+            if not result:
+                raise ValueError("Failed to process PDF document")
             
-            # Structure analysis for academic papers
-            structured_doc = await asyncio.to_thread(structure_analyzer.analyze, document)
+            # Extract document data from result
+            document = result
+            structured_doc = result
             
             # Extract elements
             elements = []
