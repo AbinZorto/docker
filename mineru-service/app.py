@@ -611,6 +611,10 @@ async def process_pdf(
         processing_options = ProcessingOptions(**options_dict)
         # Check both sources for force parameter (JSON and form field)
         force_reprocess = options_dict.get('force', False) or force.lower() in ('1', 'true', 'yes')
+        
+        # Add debug logging
+        logger.info(f"[DEBUG] Force parameters received - form_field: '{force}', json_option: {options_dict.get('force', 'not found')}, final_force_reprocess: {force_reprocess}")
+        
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid options: {e}")
     
