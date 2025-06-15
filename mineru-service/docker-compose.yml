@@ -6,7 +6,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - MINERU_API_KEY=${MINERU_API_KEY:-your-secure-api-key}
+      - MINERU_API_KEY=${MINERU_API_KEY:-cbe9f548-54fe-4e9c-ada6-15291466d213}
       - REDIS_URL=redis://redis:6379
       - MAX_FILE_SIZE=100
       - CACHE_TTL=7200
