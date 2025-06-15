@@ -1,0 +1,22 @@
+# Core FastAPI dependencies
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+pydantic==2.5.0
+pydantic-settings==2.1.0
+aiofiles==23.2.1
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+redis==5.0.1
+celery==5.3.4
+requests==2.31.0
+httpx==0.25.2
+tenacity==8.2.3
+loguru==0.7.2
+
+# Basic image processing (for non-MinerU fallback)
+pillow==10.1.0
+numpy==1.25.2
+
+# MinerU and its dependencies will be installed via pip in Dockerfile
+# This approach ensures we get the official MinerU with all its dependencies 
