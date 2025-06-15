@@ -9,7 +9,7 @@ import json
 import base64
 from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
@@ -586,6 +586,7 @@ async def get_status():
 @app.post("/process-pdf", response_model=ProcessingResponse)
 async def process_pdf(
     background_tasks: BackgroundTasks,
+    request: Request,  # Move this before default arguments
     pdf: UploadFile = File(...),
     options: str = '{}',
     force: str = '0',
@@ -605,6 +606,9 @@ async def process_pdf(
             detail=f"File too large. Maximum size: {settings.max_file_size // (1024 * 1024)}MB"
         )
     
+    # Check force in query params too
+    query_force = request.query_params.get('force', 'false').lower() in ('true', '1', 'yes')
+    
     # Parse options
     try:
         options_dict = json.loads(options) if options else {}
@@ -615,11 +619,14 @@ async def process_pdf(
         logger.info(f"[DEBUG] Options dict keys: {list(options_dict.keys())}")
         
         processing_options = ProcessingOptions(**options_dict)
-        # Check both sources for force parameter (JSON and form field)
-        force_reprocess = options_dict.get('force', False) or force.lower() in ('1', 'true', 'yes')
+        # Check all three sources for force parameter
+        force_reprocess = (
+            options_dict.get('force', False) or 
+            force.lower() in ('1', 'true', 'yes') or 
+            query_force
+        )
         
-        # Add debug logging
-        logger.info(f"[DEBUG] Force parameters received - form_field: '{force}', json_option: {options_dict.get('force', 'not found')}, final_force_reprocess: {force_reprocess}")
+        logger.info(f"[DEBUG] Force sources - form_field: '{force}', json_option: {options_dict.get('force', 'not found')}, query_param: {query_force}, final: {force_reprocess}")
         
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid options: {e}")
