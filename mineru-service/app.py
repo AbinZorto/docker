@@ -291,6 +291,8 @@ class MinerUProcessor:
         elements = []
         markdown_content = ""
         sections = []
+        extracted_title = None
+        extracted_abstract = None
         
         try:
             # Log all files in output directory for debugging
@@ -316,7 +318,7 @@ class MinerUProcessor:
                     content = await f.read()
                     data = json.loads(content)
                     elements = self._convert_mineru_content_list_to_elements(data)
-                    sections = self._build_sections_from_elements(elements)
+                    sections, extracted_title, extracted_abstract = self._extract_structured_content_from_elements(elements)
             # Fallback to other JSON files
             elif json_files:
                 json_file = json_files[0]  # Take first JSON file
@@ -325,13 +327,18 @@ class MinerUProcessor:
                     content = await f.read()
                     data = json.loads(content)
                     elements = self._convert_mineru_json_to_elements(data)
-                    sections = self._build_sections_from_elements(elements)
+                    sections, extracted_title, extracted_abstract = self._extract_structured_content_from_elements(elements)
             
-            # Parse Markdown output if available  
+            # Parse Markdown output if available and try to extract title/abstract from it
             if md_files:
                 md_file = md_files[0]  # Take first markdown file
                 async with aiofiles.open(md_file, 'r', encoding='utf-8') as f:
                     markdown_content = await f.read()
+                    # Try to extract title and abstract from markdown if not already found
+                    if not extracted_title or not extracted_abstract:
+                        md_title, md_abstract = self._extract_title_abstract_from_markdown(markdown_content)
+                        extracted_title = extracted_title or md_title
+                        extracted_abstract = extracted_abstract or md_abstract
             
             # If no specific output found, create basic structure
             if not elements and not markdown_content:
@@ -345,9 +352,10 @@ class MinerUProcessor:
                 )]
                 markdown_content = "# Document processed\n\nProcessing completed successfully."
             
-            # Create structured content
+            # Create structured content with extracted information
             structured_content = StructuredContent(
-                title="Processed Document",
+                title=extracted_title,  # Use extracted title instead of hardcoded
+                abstract=extracted_abstract,  # Use extracted abstract
                 sections=sections
             )
             
@@ -390,22 +398,85 @@ class MinerUProcessor:
         if isinstance(data, list):
             for idx, item in enumerate(data):
                 if isinstance(item, dict):
+                    # Get element type, defaulting to 'text'
                     element_type = item.get('type', 'text')
-                    text_content = item.get('text', '').strip()
-                    page_idx = item.get('page_idx', 0)
                     
-                    if text_content:  # Only add non-empty content
-                        element = MinerUElement(
-                            type=element_type,
-                            content=text_content,
-                            bbox=BoundingBox(x=0.0, y=0.0, width=0.0, height=0.0),
-                            pageNumber=page_idx + 1,  # Convert 0-based to 1-based page numbering
-                            hierarchy=None,
-                            confidence=0.9,  # High confidence for MinerU results
-                            metadata={"source": "mineru_content_list", "original_idx": idx}
+                    # Handle different possible content fields
+                    text_content = (
+                        item.get('text', '') or 
+                        item.get('content', '') or 
+                        item.get('markdown', '') or
+                        str(item.get('value', ''))
+                    ).strip()
+                    
+                    # Skip empty content
+                    if not text_content:
+                        continue
+                    
+                    # Get page information
+                    page_idx = item.get('page_idx', item.get('page', item.get('pageNumber', 0)))
+                    
+                    # Get bounding box information if available
+                    bbox_info = item.get('bbox', {})
+                    if isinstance(bbox_info, dict):
+                        bbox = BoundingBox(
+                            x=bbox_info.get('x', 0.0),
+                            y=bbox_info.get('y', 0.0),
+                            width=bbox_info.get('width', 0.0),
+                            height=bbox_info.get('height', 0.0)
                         )
-                        elements.append(element)
+                    else:
+                        bbox = BoundingBox(x=0.0, y=0.0, width=0.0, height=0.0)
+                    
+                    # Determine element type based on content patterns if type is generic
+                    if element_type == 'text' or element_type == 'span':
+                        # Check if this looks like a heading
+                        if self._looks_like_heading(text_content):
+                            element_type = 'heading'
+                        # Check for other patterns
+                        elif any(keyword in text_content.lower() for keyword in ['figure', 'fig.', 'table', 'tab.']):
+                            element_type = 'caption'
+                    
+                    # Create hierarchy information if available
+                    hierarchy = None
+                    if 'hierarchy' in item:
+                        hierarchy_data = item['hierarchy']
+                        hierarchy = Hierarchy(
+                            level=hierarchy_data.get('level', 1),
+                            parent=hierarchy_data.get('parent'),
+                            section=hierarchy_data.get('section', text_content[:50])
+                        )
+                    
+                    # Create metadata
+                    metadata = {}
+                    if 'style' in item or 'font' in item or 'format' in item:
+                        style_data = item.get('style', item.get('font', item.get('format', {})))
+                        if isinstance(style_data, dict):
+                            metadata.update({
+                                'fontSize': style_data.get('size', style_data.get('fontSize')),
+                                'fontWeight': style_data.get('weight', style_data.get('fontWeight')),
+                                'isItalic': style_data.get('italic', style_data.get('isItalic')),
+                            })
+                    
+                    # Add original MinerU data to metadata
+                    metadata.update({
+                        'source': 'mineru_content_list',
+                        'original_idx': idx,
+                        'original_type': item.get('type', 'unknown')
+                    })
+                    
+                    element = MinerUElement(
+                        type=element_type,
+                        content=text_content,
+                        bbox=bbox,
+                        pageNumber=page_idx + 1,  # Convert 0-based to 1-based page numbering
+                        hierarchy=hierarchy,
+                        confidence=item.get('confidence', 0.9),  # High confidence for MinerU results
+                        metadata=metadata if metadata else None
+                    )
+                    elements.append(element)
         
+        logger.info(f"Converted {len(elements)} elements from MinerU content_list")
         return elements
     
     def _convert_mineru_json_to_elements(self, data: Dict) -> List[MinerUElement]:
@@ -423,29 +494,150 @@ class MinerUProcessor:
                     
         return elements
     
-    def _build_sections_from_elements(self, elements: List[MinerUElement]) -> List[Section]:
-        """Build sections from elements"""
+    def _extract_structured_content_from_elements(self, elements: List[MinerUElement]) -> tuple[List[Section], Optional[str], Optional[str]]:
+        """Extract structured content (sections, title, abstract) from MinerU elements"""
         sections = []
         current_section = None
+        extracted_title = None
+        extracted_abstract = None
         
+        # First pass: look for title and abstract patterns
+        for i, element in enumerate(elements):
+            content_lower = element.content.lower().strip()
+            
+            # Look for title (typically first substantial text element, or one with "title" indicators)
+            if not extracted_title and element.type in ["text", "title", "heading"]:
+                # Skip very short content, page numbers, headers/footers
+                if (len(element.content.strip()) > 10 and 
+                    not content_lower.isdigit() and 
+                    not content_lower.startswith(('page ', 'doi:', 'arxiv:')) and
+                    element.pageNumber <= 2):  # Title usually on first couple pages
+                    
+                    # Higher priority for elements with title-like characteristics
+                    if (any(keyword in content_lower for keyword in ['title', 'abstract']) or
+                        element.type in ['title', 'heading'] or
+                        (i < 5 and len(element.content.strip()) < 200)):  # Early elements, reasonable length
+                        extracted_title = element.content.strip()
+            
+            # Look for abstract
+            if not extracted_abstract and element.type == "text":
+                if (content_lower.startswith('abstract') or 
+                    'abstract' in content_lower[:50] or
+                    (extracted_title and i > 0 and i < 10 and len(element.content.strip()) > 100)):
+                    
+                    # Clean up abstract text
+                    abstract_text = element.content.strip()
+                    if abstract_text.lower().startswith('abstract'):
+                        # Remove "abstract" prefix and clean up
+                        abstract_text = abstract_text[8:].strip()
+                        if abstract_text.startswith(':') or abstract_text.startswith('-'):
+                            abstract_text = abstract_text[1:].strip()
+                    
+                    if len(abstract_text) > 50:  # Reasonable abstract length
+                        extracted_abstract = abstract_text
+        
+        # Second pass: build sections from headings
         for element in elements:
-            if element.type == "heading":
+            if element.type in ["heading", "title"] or self._looks_like_heading(element.content):
                 # Start new section
                 if current_section:
                     sections.append(current_section)
+                
+                # Determine heading level
+                level = 1
+                if element.hierarchy and element.hierarchy.level:
+                    level = element.hierarchy.level
+                else:
+                    # Try to infer level from content patterns
+                    content = element.content.strip()
+                    if content.count('.') >= 2:  # Like "1.2.3 Subsection"
+                        level = content.count('.') + 1
+                    elif content[0:1].isdigit():  # Like "1. Section"
+                        level = 2
+                
                 current_section = Section(
-                    title=element.content,
-                    level=element.hierarchy.level if element.hierarchy else 1,
+                    title=element.content.strip(),
+                    level=level,
                     content="",
                     elements=[element]
                 )
-            elif current_section:
+            elif current_section and element.type == "text":
                 current_section.elements.append(element)
                 current_section.content += element.content + "\n"
         
+        # Add final section
         if current_section:
             sections.append(current_section)
             
+        return sections, extracted_title, extracted_abstract
+    
+    def _looks_like_heading(self, text: str) -> bool:
+        """Determine if text looks like a section heading"""
+        text = text.strip()
+        if len(text) > 200:  # Too long to be a heading
+            return False
+        
+        # Common heading patterns
+        heading_patterns = [
+            r'^\d+\.?\s+[A-Z]',  # "1. Introduction" or "1 Introduction"
+            r'^\d+\.\d+\.?\s+[A-Z]',  # "1.1 Background" 
+            r'^[A-Z][A-Z\s]{5,50}$',  # "INTRODUCTION", "RELATED WORK"
+            r'^[A-Z][a-z]+(\s[A-Z][a-z]*)*$',  # "Introduction", "Related Work"
+        ]
+        
+        import re
+        return any(re.match(pattern, text) for pattern in heading_patterns)
+    
+    def _extract_title_abstract_from_markdown(self, markdown_content: str) -> tuple[Optional[str], Optional[str]]:
+        """Extract title and abstract from markdown content"""
+        lines = markdown_content.split('\n')
+        extracted_title = None
+        extracted_abstract = None
+        
+        # Look for title (first # heading or first substantial line)
+        for i, line in enumerate(lines):
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Title from markdown heading
+            if line.startswith('# ') and not extracted_title:
+                extracted_title = line[2:].strip()
+                continue
+            
+            # Title from first substantial line
+            if not extracted_title and len(line) > 10 and not line.startswith(('#', '*', '-', '>')):
+                extracted_title = line
+                continue
+            
+            # Abstract detection
+            if 'abstract' in line.lower() and not extracted_abstract:
+                # Abstract might be on same line or following lines
+                if ':' in line:
+                    abstract_text = line.split(':', 1)[1].strip()
+                    if len(abstract_text) > 20:
+                        extracted_abstract = abstract_text
+                else:
+                    # Look at next few lines for abstract content
+                    abstract_lines = []
+                    for j in range(i + 1, min(i + 10, len(lines))):
+                        next_line = lines[j].strip()
+                        if not next_line or next_line.startswith('#'):
+                            break
+                        abstract_lines.append(next_line)
+                    
+                    if abstract_lines:
+                        extracted_abstract = ' '.join(abstract_lines)
+                
+                if extracted_abstract and len(extracted_abstract) > 300:
+                    # Truncate very long abstracts
+                    extracted_abstract = extracted_abstract[:300] + "..."
+        
+        return extracted_title, extracted_abstract
+
+    def _build_sections_from_elements(self, elements: List[MinerUElement]) -> List[Section]:
+        """Build sections from elements (legacy method, kept for compatibility)"""
+        sections, _, _ = self._extract_structured_content_from_elements(elements)
         return sections
 
     async def process_pdf_raw(self, pdf_path: str, options: ProcessingOptions, force: bool = False) -> Dict:
