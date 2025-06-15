@@ -104,6 +104,9 @@ class ProcessingOptions(BaseModel):
     layoutAnalysis: Optional[bool] = Field(default=None, description="Legacy: always enabled")
     extractImages: Optional[bool] = Field(default=None, description="Legacy: use extract_images")
     outputFormat: Optional[str] = Field(default=None, description="Legacy: use output_format")
+    
+    # Add at the end:
+    force: bool = Field(default=False, description="Force reprocessing, ignore cache")
 
 class BoundingBox(BaseModel):
     x: float
@@ -267,8 +270,17 @@ class MinerUProcessor:
         except asyncio.TimeoutError:
             raise HTTPException(status_code=504, detail="Processing timeout")
         except Exception as e:
-            logger.error(f"Processing error: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            # Enhanced error logging
+            if hasattr(e, 'last_attempt') and hasattr(e.last_attempt, 'exception'):
+                underlying_error = e.last_attempt.exception()
+                logger.error(f"Processing error (after {e.last_attempt.attempt_number} retries): {underlying_error}")
+                if isinstance(underlying_error, HTTPException):
+                    raise underlying_error
+                else:
+                    raise HTTPException(status_code=500, detail=f"Processing failed: {str(underlying_error)}")
+            else:
+                logger.error(f"Processing error: {e}")
+                raise HTTPException(status_code=500, detail=f"Internal processing error: {str(e)}")
         finally:
             # Cleanup temporary output directory
             if output_dir.exists():
@@ -436,6 +448,82 @@ class MinerUProcessor:
             
         return sections
 
+    async def process_pdf_raw(self, pdf_path: str, options: ProcessingOptions, force: bool = False) -> Dict:
+        """Process PDF and return raw MinerU output files"""
+        
+        if not MINERU_AVAILABLE:
+            raise HTTPException(status_code=503, detail="MinerU not available")
+        
+        # Create temporary output directory
+        output_dir = self.temp_dir / f"raw_output_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+        output_dir.mkdir(exist_ok=True)
+        
+        try:
+            # Build and execute MinerU command
+            cmd = self._build_mineru_command(pdf_path, str(output_dir), options)
+            logger.info(f"Executing raw command: {' '.join(cmd)}")
+            
+            # Run MinerU command
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(output_dir)
+            )
+            
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
+            
+            if process.returncode != 0:
+                error_msg = stderr.decode() if stderr else "Unknown error"
+                raise ValueError(f"MinerU processing failed: {error_msg}")
+            
+            # Collect all output files
+            files = {}
+            file_count = 0
+            
+            for file_path in output_dir.rglob("*"):
+                if file_path.is_file():
+                    file_count += 1
+                    relative_path = str(file_path.relative_to(output_dir))
+                    
+                    try:
+                        # Try to read as text first
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                            files[relative_path] = {
+                                "type": "text",
+                                "content": content,
+                                "size": len(content)
+                            }
+                    except UnicodeDecodeError:
+                        # If not text, read as binary and base64 encode
+                        with open(file_path, 'rb') as f:
+                            content = f.read()
+                            files[relative_path] = {
+                                "type": "binary",
+                                "content": base64.b64encode(content).decode(),
+                                "size": len(content)
+                            }
+                    except Exception as e:
+                        files[relative_path] = {
+                            "type": "error",
+                            "content": str(e),
+                            "size": 0
+                        }
+            
+            return {
+                "success": True,
+                "file_count": file_count,
+                "files": files,
+                "stdout": stdout.decode() if stdout else "",
+                "stderr": stderr.decode() if stderr else "",
+            }
+            
+        finally:
+            # Cleanup
+            if output_dir.exists():
+                shutil.rmtree(output_dir, ignore_errors=True)
+
 # Processor instance
 processor = MinerUProcessor()
 
@@ -520,12 +608,13 @@ async def process_pdf(
     try:
         options_dict = json.loads(options) if options else {}
         processing_options = ProcessingOptions(**options_dict)
+        force_reprocess = options_dict.get('force', False)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid options: {e}")
     
     # Check cache
     cache_key = get_cache_key(content + options.encode())
-    cached_result = await get_cached_result(cache_key)
+    cached_result = None if force_reprocess else await get_cached_result(cache_key)
     if cached_result:
         logger.info("Returning cached result")
         return cached_result
@@ -548,25 +637,64 @@ async def process_pdf(
     except HTTPException:
         raise
     except Exception as e:
-        # Handle RetryError specifically to get underlying exception details
+        # Enhanced error logging
         if hasattr(e, 'last_attempt') and hasattr(e.last_attempt, 'exception'):
             underlying_error = e.last_attempt.exception()
             logger.error(f"Processing error (after {e.last_attempt.attempt_number} retries): {underlying_error}")
-            logger.error(f"Underlying error type: {type(underlying_error).__name__}")
             if isinstance(underlying_error, HTTPException):
                 raise underlying_error
             else:
-                import traceback
-                logger.error(f"Full underlying traceback: {traceback.format_exception(type(underlying_error), underlying_error, underlying_error.__traceback__)}")
                 raise HTTPException(status_code=500, detail=f"Processing failed: {str(underlying_error)}")
         else:
             logger.error(f"Processing error: {e}")
-            logger.error(f"Error type: {type(e).__name__}")
-            import traceback
-            logger.error(f"Full traceback: {traceback.format_exc()}")
             raise HTTPException(status_code=500, detail=f"Internal processing error: {str(e)}")
     finally:
         # Cleanup
+        if temp_pdf and os.path.exists(temp_pdf):
+            os.unlink(temp_pdf)
+
+@app.post("/process-pdf-raw")
+async def process_pdf_raw(
+    pdf: UploadFile = File(...),
+    options: str = '{}',
+    force: str = '0',
+    _auth: bool = Depends(verify_api_key)
+):
+    """Process PDF and return raw MinerU output files"""
+    
+    # Validate file
+    if not pdf.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+    
+    content = await pdf.read()
+    if len(content) > settings.max_file_size:
+        raise HTTPException(status_code=413, detail=f"File too large. Maximum size: {settings.max_file_size // (1024 * 1024)}MB")
+    
+    # Parse options
+    try:
+        options_dict = json.loads(options) if options else {}
+        processing_options = ProcessingOptions(**options_dict)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid options: {e}")
+    
+    # Check force parameter
+    force_reprocess = force.lower() in ('1', 'true', 'yes')
+    
+    # Save uploaded file temporarily
+    temp_pdf = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as f:
+            f.write(content)
+            temp_pdf = f.name
+        
+        # Process and get raw files
+        result = await processor.process_pdf_raw(temp_pdf, processing_options, force_reprocess)
+        return result
+        
+    except Exception as e:
+        logger.error(f"Raw processing error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
         if temp_pdf and os.path.exists(temp_pdf):
             os.unlink(temp_pdf)
 
