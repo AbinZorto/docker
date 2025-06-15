@@ -3,7 +3,7 @@ import asyncio
 import tempfile
 import shutil
 import subprocess
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime
 import json
 import base64
@@ -275,166 +275,128 @@ class MinerUProcessor:
                 shutil.rmtree(output_dir, ignore_errors=True)
     
     async def _parse_mineru_output(self, output_dir: Path, options: ProcessingOptions) -> ProcessingResponse:
-        """Parse MinerU output files into our response format"""
-        elements = []
-        markdown_content = ""
-        sections = []
-        
+        """Parse MinerU output files into our response format."""
         try:
-            # Log all files in output directory for debugging
-            all_files = list(output_dir.rglob("*"))
-            logger.info(f"Files in output directory {output_dir}:")
-            for file in all_files:
-                logger.info(f"  {file.relative_to(output_dir)} ({'dir' if file.is_dir() else 'file'})")
-            
-            # Look for MinerU output files (typically JSON and markdown)
-            json_files = list(output_dir.rglob("*.json"))  # Use rglob to search subdirectories
-            md_files = list(output_dir.rglob("*.md"))
-            
-            # Prioritize content_list.json files which contain the structured content
             content_list_files = list(output_dir.rglob("*_content_list.json"))
+            logger.info(f"Found {len(content_list_files)} content_list files in {output_dir}")
+
+            if not content_list_files:
+                raise FileNotFoundError("Could not find '*_content_list.json' in the output directory.")
+
+            json_file = content_list_files[0]
+            logger.info(f"Parsing content_list file: {json_file}")
+            async with aiofiles.open(json_file, 'r', encoding='utf-8') as f:
+                raw_data = json.loads(await f.read())
+
+            all_elements: List[MinerUElement] = []
+            for item in raw_data:
+                if not all(k in item for k in ['bbox', 'page_idx', 'text', 'type']):
+                    continue
+                
+                bbox_raw = item['bbox']
+                if not isinstance(bbox_raw, list) or len(bbox_raw) != 4:
+                    continue
+
+                bbox = BoundingBox(
+                    x=bbox_raw[0],
+                    y=bbox_raw[1],
+                    width=bbox_raw[2] - bbox_raw[0],
+                    height=bbox_raw[3] - bbox_raw[1]
+                )
+
+                element = MinerUElement(
+                    type=item.get('type', 'text'),
+                    content=item.get('text', '').strip(),
+                    bbox=bbox,
+                    pageNumber=item.get('page_idx', 0) + 1,
+                    confidence=item.get('confidence', 0.9),
+                    hierarchy=None, 
+                    metadata=None 
+                )
+                all_elements.append(element)
             
-            logger.info(f"Found {len(json_files)} JSON files, {len(content_list_files)} content_list files, and {len(md_files)} MD files")
+            title, sections = self._build_structure_from_elements(all_elements)
             
-            # Parse content_list.json output if available (preferred)
-            if content_list_files:
-                json_file = content_list_files[0]  # Take first content_list file
-                logger.info(f"Using content_list file: {json_file}")
-                async with aiofiles.open(json_file, 'r', encoding='utf-8') as f:
-                    content = await f.read()
-                    data = json.loads(content)
-                    elements = self._convert_mineru_content_list_to_elements(data)
-                    sections = self._build_sections_from_elements(elements)
-            # Fallback to other JSON files
-            elif json_files:
-                json_file = json_files[0]  # Take first JSON file
-                logger.info(f"Using JSON file: {json_file}")
-                async with aiofiles.open(json_file, 'r', encoding='utf-8') as f:
-                    content = await f.read()
-                    data = json.loads(content)
-                    elements = self._convert_mineru_json_to_elements(data)
-                    sections = self._build_sections_from_elements(elements)
-            
-            # Parse Markdown output if available  
-            if md_files:
-                md_file = md_files[0]  # Take first markdown file
-                async with aiofiles.open(md_file, 'r', encoding='utf-8') as f:
-                    markdown_content = await f.read()
-            
-            # If no specific output found, create basic structure
-            if not elements and not markdown_content:
-                # Create minimal response
-                elements = [MinerUElement(
-                    type="text",
-                    content="Processing completed but no structured output available",
-                    bbox=BoundingBox(x=0, y=0, width=0, height=0),
-                    pageNumber=1,
-                    confidence=0.5
-                )]
-                markdown_content = "# Document processed\n\nProcessing completed successfully."
-            
-            # Create structured content
-            structured_content = StructuredContent(
-                title="Processed Document",
-                sections=sections
-            )
-            
-            # Create metadata
+            markdown_content = self._generate_markdown(title, sections)
+
             metadata = ProcessingMetadata(
-                totalPages=len(set(elem.pageNumber for elem in elements)) if elements else 1,
+                totalPages=len(set(el.pageNumber for el in all_elements)) if all_elements else 1,
                 processingTimeMs=0,  # Will be set by caller
                 detectedLanguage=options.lang or "auto",
                 documentType="research_paper"
             )
-            
+
             return ProcessingResponse(
                 success=True,
-                elements=elements,
+                elements=all_elements,
                 markdown=markdown_content,
-                structuredContent=structured_content,
+                structuredContent=StructuredContent(title=title, sections=sections),
                 metadata=metadata
             )
-            
+
         except Exception as e:
-            logger.error(f"Error parsing MinerU output: {e}")
-            # Return basic successful response even if parsing fails
+            logger.error(f"Error parsing MinerU output: {e}", exc_info=True)
             return ProcessingResponse(
-                success=True,
+                success=False,
                 elements=[],
-                markdown="# Processing completed\n\nDocument was processed but detailed extraction failed.",
-                structuredContent=StructuredContent(title="Processed Document", sections=[]),
+                markdown="# Processing Error\n\nFailed to parse the structured output from MinerU.",
+                structuredContent=StructuredContent(title="Parsing Failed", sections=[]),
                 metadata=ProcessingMetadata(
-                    totalPages=1,
-                    processingTimeMs=0,
-                    detectedLanguage="auto",
-                    documentType="unknown"
-                )
+                    totalPages=0, processingTimeMs=0, detectedLanguage="unknown", documentType="unknown"
+                ),
+                error=f"Failed to parse MinerU output: {e}"
             )
-    
-    def _convert_mineru_content_list_to_elements(self, data) -> List[MinerUElement]:
-        """Convert MinerU content_list JSON output to our element format"""
-        elements = []
-        
-        if isinstance(data, list):
-            for idx, item in enumerate(data):
-                if isinstance(item, dict):
-                    element_type = item.get('type', 'text')
-                    text_content = item.get('text', '').strip()
-                    page_idx = item.get('page_idx', 0)
-                    
-                    if text_content:  # Only add non-empty content
-                        element = MinerUElement(
-                            type=element_type,
-                            content=text_content,
-                            bbox=BoundingBox(x=0.0, y=0.0, width=0.0, height=0.0),
-                            pageNumber=page_idx + 1,  # Convert 0-based to 1-based page numbering
-                            hierarchy=None,
-                            confidence=0.9,  # High confidence for MinerU results
-                            metadata={"source": "mineru_content_list", "original_idx": idx}
-                        )
-                        elements.append(element)
-        
-        return elements
-    
-    def _convert_mineru_json_to_elements(self, data: Dict) -> List[MinerUElement]:
-        """Convert MinerU JSON output to our element format"""
-        elements = []
-        
-        # This is a placeholder - actual implementation would depend on 
-        # MinerU's specific JSON output format which we'll discover after successful run
-        if isinstance(data, dict):
-            # Handle different possible MinerU output structures
-            for key, value in data.items():
-                if isinstance(value, (list, dict)):
-                    # Process nested structures
-                    continue
-                    
-        return elements
-    
-    def _build_sections_from_elements(self, elements: List[MinerUElement]) -> List[Section]:
-        """Build sections from elements"""
-        sections = []
-        current_section = None
-        
-        for element in elements:
-            if element.type == "heading":
-                # Start new section
-                if current_section:
-                    sections.append(current_section)
-                current_section = Section(
-                    title=element.content,
-                    level=element.hierarchy.level if element.hierarchy else 1,
-                    content="",
-                    elements=[element]
-                )
-            elif current_section:
-                current_section.elements.append(element)
-                current_section.content += element.content + "\n"
-        
-        if current_section:
-            sections.append(current_section)
             
-        return sections
+    def _build_structure_from_elements(self, elements: List[MinerUElement]) -> Tuple[Optional[str], List[Section]]:
+        import re
+        
+        if not elements:
+            return None, []
+
+        title = elements[0].content
+        sections: List[Section] = []
+        current_section_elements: List[MinerUElement] = []
+        
+        # Simple heading detection regex (e.g., "1. Introduction", "Abstract")
+        heading_regex = re.compile(r"^(?:[IVXLCDM]+\.|[0-9]+\.|\b(?:Abstract|Introduction|Conclusion|Discussion|Results|Methods|References))\b", re.IGNORECASE)
+
+        for el in elements[1:]: # Skip title
+            if heading_regex.match(el.content):
+                if current_section_elements:
+                    # Finalize previous section
+                    sections[-1].content = "\n".join(e.content for e in current_section_elements)
+                    sections[-1].elements = current_section_elements
+                
+                # Start new section
+                new_section = Section(
+                    title=el.content,
+                    level=1,
+                    content="",
+                    elements=[]
+                )
+                sections.append(new_section)
+                current_section_elements = []
+            else:
+                if sections:
+                    current_section_elements.append(el)
+
+        # Add the last section's content
+        if sections and current_section_elements:
+            sections[-1].content = "\n".join(e.content for e in current_section_elements)
+            sections[-1].elements = current_section_elements
+            
+        return title, sections
+
+    def _generate_markdown(self, title: Optional[str], sections: List[Section]) -> str:
+        md = ""
+        if title:
+            md += f"# {title}\n\n"
+        
+        for section in sections:
+            md += f"## {section.title}\n\n"
+            md += section.content + "\n\n"
+            
+        return md.strip()
 
 # Processor instance
 processor = MinerUProcessor()
@@ -571,6 +533,151 @@ async def process_pdf(
             import traceback
             logger.error(f"Full traceback: {traceback.format_exc()}")
             raise HTTPException(status_code=500, detail=f"Internal processing error: {str(e)}")
+    finally:
+        # Cleanup
+        if temp_pdf and os.path.exists(temp_pdf):
+            os.unlink(temp_pdf)
+
+@app.post("/process-pdf-raw")
+async def process_pdf_raw(
+    background_tasks: BackgroundTasks,
+    pdf: UploadFile = File(...),
+    options: str = Form('{}'),
+    force: str = Form('false'),
+    _auth: bool = Depends(verify_api_key)
+):
+    """Process PDF with MinerU and return all raw output files"""
+    
+    # Validate file
+    if not pdf.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+    
+    # Check file size
+    content = await pdf.read()
+    if len(content) > settings.max_file_size:
+        raise HTTPException(
+            status_code=413, 
+            detail=f"File too large. Maximum size: {settings.max_file_size // (1024 * 1024)}MB"
+        )
+    
+    # Parse options
+    try:
+        options_dict = json.loads(options) if options else {}
+        processing_options = ProcessingOptions(**options_dict)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid options: {e}")
+    
+    # Check cache
+    force_reprocess = force.lower() == 'true'
+    cache_key = f"raw:{get_cache_key(content + options.encode())}"
+
+    if not force_reprocess and redis_client:
+        try:
+            cached_result = await asyncio.to_thread(redis_client.get, f"mineru:raw:{cache_key}")
+            if cached_result:
+                logger.info(f"Returning cached raw result for cache key: {cache_key}")
+                return json.loads(cached_result)
+        except Exception as e:
+            logger.warning(f"Cache retrieval error: {e}")
+    elif force_reprocess:
+        logger.info(f"Force re-analysis for raw cache key: {cache_key}. Bypassing cache.")
+
+    # Save uploaded file temporarily
+    temp_pdf = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as f:
+            f.write(content)
+            temp_pdf = f.name
+        
+        # Process with MinerU but keep output directory
+        output_dir = processor.temp_dir / f"output_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+        output_dir.mkdir(exist_ok=True)
+        
+        try:
+            # Build and execute MinerU command
+            cmd = processor._build_mineru_command(temp_pdf, str(output_dir), processing_options)
+            logger.info(f"Executing command: {' '.join(cmd)}")
+            
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(output_dir)
+            )
+            
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
+            
+            if process.returncode != 0:
+                error_msg = stderr.decode() if stderr else "Unknown error"
+                raise HTTPException(status_code=500, detail=f"MinerU processing failed: {error_msg}")
+            
+            # Collect all output files
+            raw_files = {}
+            all_files = list(output_dir.rglob("*"))
+            
+            for file_path in all_files:
+                if file_path.is_file():
+                    relative_path = str(file_path.relative_to(output_dir))
+                    try:
+                        if file_path.suffix.lower() in ['.json', '.md', '.txt']:
+                            # Text files - read as text
+                            async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
+                                content = await f.read()
+                                raw_files[relative_path] = {
+                                    "type": "text",
+                                    "content": content,
+                                    "size": len(content.encode('utf-8'))
+                                }
+                        else:
+                            # Binary files (images, PDFs) - encode as base64
+                            async with aiofiles.open(file_path, 'rb') as f:
+                                binary_content = await f.read()
+                                raw_files[relative_path] = {
+                                    "type": "binary",
+                                    "content": base64.b64encode(binary_content).decode('utf-8'),
+                                    "size": len(binary_content)
+                                }
+                    except Exception as e:
+                        logger.warning(f"Could not read file {file_path}: {e}")
+                        raw_files[relative_path] = {
+                            "type": "error",
+                            "content": f"Error reading file: {e}",
+                            "size": 0
+                        }
+            
+            result = {
+                "success": True,
+                "files": raw_files,
+                "file_count": len(raw_files),
+                "stdout": stdout.decode() if stdout else "",
+                "stderr": stderr.decode() if stderr else "",
+                "processing_time_ms": 0  # Could add timing if needed
+            }
+            
+            # Cache result
+            if redis_client:
+                try:
+                    await asyncio.to_thread(
+                        redis_client.setex,
+                        f"mineru:raw:{cache_key}",
+                        settings.cache_ttl,
+                        json.dumps(result)
+                    )
+                except Exception as e:
+                    logger.warning(f"Cache storage error: {e}")
+            
+            return result
+            
+        finally:
+            # Cleanup output directory
+            if output_dir.exists():
+                shutil.rmtree(output_dir, ignore_errors=True)
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Raw processing error: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal processing error: {str(e)}")
     finally:
         # Cleanup
         if temp_pdf and os.path.exists(temp_pdf):
