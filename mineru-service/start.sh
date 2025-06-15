@@ -11,8 +11,21 @@ echo "📅 $(date)"
 
 # Verify MinerU installation
 echo "🔍 Verifying MinerU installation..."
-python3 -c "import magic_pdf; print(f'✅ MinerU version: {magic_pdf.__version__}')" || {
-    echo "❌ MinerU not installed properly"
+python3 -c "
+try:
+    from magic_pdf.api.magic_pdf_api import pdf_parse_main
+    print('✅ MinerU (magic-pdf) installed successfully')
+except ImportError as e:
+    print(f'❌ MinerU not installed properly: {e}')
+    # Try alternative import
+    try:
+        import magic_pdf
+        print('✅ MinerU base module found')
+    except ImportError:
+        print('❌ MinerU not found at all')
+        exit(1)
+" || {
+    echo "❌ MinerU verification failed"
     exit 1
 }
 
@@ -20,7 +33,7 @@ python3 -c "import magic_pdf; print(f'✅ MinerU version: {magic_pdf.__version__
 echo "🔍 Checking dependencies..."
 python3 -c "
 import sys
-required_modules = ['fastapi', 'uvicorn', 'redis', 'PIL', 'cv2', 'numpy']
+required_modules = ['fastapi', 'uvicorn', 'redis', 'PIL', 'numpy']
 missing = []
 for module in required_modules:
     try:
@@ -30,28 +43,40 @@ for module in required_modules:
         missing.append(module)
         print(f'❌ {module}')
 
+# Check optional dependencies
+optional_modules = ['cv2', 'torch']
+for module in optional_modules:
+    try:
+        __import__(module)
+        print(f'✅ {module} (optional)')
+    except ImportError:
+        print(f'⚠️ {module} (optional) - not available')
+
 if missing:
-    print(f'Missing modules: {missing}')
+    print(f'Missing required modules: {missing}')
     sys.exit(1)
 "
 
 # Set up directories
 echo "📁 Setting up directories..."
-mkdir -p /app/uploads /app/outputs /app/cache /app/logs
-chmod 755 /app/uploads /app/outputs /app/cache /app/logs
+mkdir -p /app/uploads /app/outputs /app/cache /app/logs /app/models
+chmod 755 /app/uploads /app/outputs /app/cache /app/logs /app/models
 
 # Test GPU availability (optional)
 echo "🖥️ Checking GPU availability..."
 python3 -c "
-import torch
-print(f'🔥 PyTorch version: {torch.__version__}')
-if torch.cuda.is_available():
-    print(f'✅ CUDA available: {torch.cuda.device_count()} GPU(s)')
-    for i in range(torch.cuda.device_count()):
-        print(f'   GPU {i}: {torch.cuda.get_device_name(i)}')
-else:
-    print('⚠️ CUDA not available, using CPU only')
-" 2>/dev/null || echo "⚠️ PyTorch not available for GPU acceleration"
+try:
+    import torch
+    print(f'🔥 PyTorch version: {torch.__version__}')
+    if torch.cuda.is_available():
+        print(f'✅ CUDA available: {torch.cuda.device_count()} GPU(s)')
+        for i in range(torch.cuda.device_count()):
+            print(f'   GPU {i}: {torch.cuda.get_device_name(i)}')
+    else:
+        print('⚠️ CUDA not available, using CPU only')
+except ImportError:
+    print('⚠️ PyTorch not available')
+"
 
 # Wait for Redis if configured
 if [ -n "$REDIS_URL" ]; then
