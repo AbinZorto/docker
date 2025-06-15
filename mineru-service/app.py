@@ -588,6 +588,7 @@ async def process_pdf(
     background_tasks: BackgroundTasks,
     pdf: UploadFile = File(...),
     options: str = '{}',
+    force: str = '0',
     _auth: bool = Depends(verify_api_key)
 ):
     """Process PDF with MinerU"""
@@ -608,11 +609,12 @@ async def process_pdf(
     try:
         options_dict = json.loads(options) if options else {}
         processing_options = ProcessingOptions(**options_dict)
-        force_reprocess = options_dict.get('force', False)
+        # Check both sources for force parameter (JSON and form field)
+        force_reprocess = options_dict.get('force', False) or force.lower() in ('1', 'true', 'yes')
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid options: {e}")
     
-    # Check cache
+    # Check cache (skip if force reprocess)
     cache_key = get_cache_key(content + options.encode())
     cached_result = None if force_reprocess else await get_cached_result(cache_key)
     if cached_result:
