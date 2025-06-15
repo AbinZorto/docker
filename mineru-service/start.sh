@@ -9,25 +9,30 @@ exec > >(tee -a /app/logs/startup.log) 2>&1
 echo "🚀 Starting MinerU PDF Processing Service..."
 echo "📅 $(date)"
 
-# Verify MinerU installation
+# Verify MinerU installation using the official method
 echo "🔍 Verifying MinerU installation..."
+if command -v mineru >/dev/null 2>&1; then
+    echo "✅ MinerU command line tool found"
+    # Test mineru version
+    mineru --version 2>/dev/null && echo "✅ MinerU version check passed" || echo "⚠️ MinerU version check failed"
+else
+    echo "❌ MinerU command not found"
+    exit 1
+fi
+
+# Alternative Python module verification
 python3 -c "
 try:
-    from magic_pdf.api.magic_pdf_api import pdf_parse_main
-    print('✅ MinerU (magic-pdf) installed successfully')
-except ImportError as e:
-    print(f'❌ MinerU not installed properly: {e}')
-    # Try alternative import
+    import mineru
+    print('✅ MinerU Python module available')
+except ImportError:
     try:
+        # Try alternative imports that might work
         import magic_pdf
-        print('✅ MinerU base module found')
+        print('✅ magic_pdf module available')
     except ImportError:
-        print('❌ MinerU not found at all')
-        exit(1)
-" || {
-    echo "❌ MinerU verification failed"
-    exit 1
-}
+        print('⚠️ MinerU Python modules not directly importable (this might be normal)')
+"
 
 # Verify dependencies
 echo "🔍 Checking dependencies..."
@@ -125,4 +130,4 @@ exec uvicorn app:app \
     --log-level info \
     --access-log \
     --loop asyncio \
-    --http h11 
+    --http h11
