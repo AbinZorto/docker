@@ -608,6 +608,12 @@ async def process_pdf(
     # Parse options
     try:
         options_dict = json.loads(options) if options else {}
+        
+        # Add detailed debugging
+        logger.info(f"[DEBUG] Raw options string: '{options}'")
+        logger.info(f"[DEBUG] Parsed options_dict: {options_dict}")
+        logger.info(f"[DEBUG] Options dict keys: {list(options_dict.keys())}")
+        
         processing_options = ProcessingOptions(**options_dict)
         # Check both sources for force parameter (JSON and form field)
         force_reprocess = options_dict.get('force', False) or force.lower() in ('1', 'true', 'yes')
