@@ -484,12 +484,13 @@ class MinerUProcessor:
                                     pageNumber=page_idx + 1,
                                     hierarchy=None,
                                     confidence=0.95,
-                                    metadata={
-                                        "source": "mineru_middle_json",
-                                        "original_type": "image_body",
-                                        "block_index": block_index
-                                    }
+                                    metadata=None
                                 )
+                                image_element.__dict__["_mineru_metadata"] = {
+                                    "source": "mineru_middle_json",
+                                    "original_type": "image_body",
+                                    "block_index": block_index
+                                }
                                 elements.append(image_element)
                             
                             if image_caption.strip():
@@ -500,13 +501,13 @@ class MinerUProcessor:
                                     pageNumber=page_idx + 1,
                                     hierarchy=None,
                                     confidence=0.95,
-                                    metadata={
-                                        "source": "mineru_middle_json",
-                                        "original_type": "image_caption",
-                                        "block_index": block_index,
-                                        "figureCaption": image_caption.strip()
-                                    }
+                                    metadata=ElementMetadata(figureCaption=image_caption.strip())
                                 )
+                                caption_element.__dict__["_mineru_metadata"] = {
+                                    "source": "mineru_middle_json",
+                                    "original_type": "image_caption",
+                                    "block_index": block_index
+                                }
                                 elements.append(caption_element)
                         
                         else:
@@ -524,12 +525,14 @@ class MinerUProcessor:
                                     pageNumber=page_idx + 1,
                                     hierarchy=None,  # Will be determined later based on content
                                     confidence=0.95,
-                                    metadata={
-                                        "source": "mineru_middle_json",
-                                        "original_type": block.get("type", "unknown"),
-                                        "block_index": block_index
-                                    }
+                                    metadata=None  # We'll store metadata separately for now
                                 )
+                                # Store metadata as a custom attribute for our processing
+                                element.__dict__["_mineru_metadata"] = {
+                                    "source": "mineru_middle_json",
+                                    "original_type": block.get("type", "unknown"),
+                                    "block_index": block_index
+                                }
                                 elements.append(element)
         
         # Sort elements by page and block index for proper order
@@ -631,15 +634,16 @@ class MinerUProcessor:
                         pageNumber=page_no + 1,  # Convert 0-based to 1-based
                         hierarchy=None,
                         confidence=confidence,
-                        metadata={
-                            "source": "mineru_model_json",
-                            "category_id": category_id,
-                            "model_score": confidence,
-                            "detection_method": "cv_model",
-                            "has_latex": bool(detection.get("latex")),
-                            "has_html": bool(detection.get("html"))
-                        }
+                        metadata=None
                     )
+                    model_element.__dict__["_mineru_metadata"] = {
+                        "source": "mineru_model_json",
+                        "category_id": category_id,
+                        "model_score": confidence,
+                        "detection_method": "cv_model",
+                        "has_latex": bool(detection.get("latex")),
+                        "has_html": bool(detection.get("html"))
+                    }
                     enhanced_elements.append(model_element)
         
         # Enhance existing elements with model data for better bounding boxes
@@ -683,20 +687,14 @@ class MinerUProcessor:
             
             # Enhance element with model data if good match found
             if best_match and best_overlap > 0.5:
-                enhanced_metadata = dict(element.metadata) if element.metadata else {}
-                enhanced_metadata.update({
-                    "model_enhanced": True,
-                    "model_score": best_match["score"],
-                    "bbox_overlap": best_overlap,
-                    "model_category_id": best_match["category_id"]
-                })
-                
                 # Use LaTeX or HTML content if available for equations
                 enhanced_content = element.content
+                enhanced_metadata = ElementMetadata()
+                
                 if best_match.get("latex") and element.type in ["equation", "formula"]:
                     enhanced_content = best_match["latex"]
                 elif best_match.get("html") and element.type in ["table"]:
-                    enhanced_metadata["html_content"] = best_match["html"]
+                    enhanced_metadata = ElementMetadata()  # Could add HTML to metadata later
                 
                 enhanced_element = MinerUElement(
                     type=element.type,
@@ -707,6 +705,18 @@ class MinerUProcessor:
                     confidence=max(element.confidence, best_match["score"]),
                     metadata=enhanced_metadata
                 )
+                
+                # Copy original metadata and add enhancements
+                original_meta = getattr(element, '_mineru_metadata', {})
+                enhanced_element.__dict__["_mineru_metadata"] = {
+                    **original_meta,
+                    "model_enhanced": True,
+                    "model_score": best_match["score"],
+                    "bbox_overlap": best_overlap,
+                    "model_category_id": best_match["category_id"]
+                }
+                if best_match.get("html"):
+                    enhanced_element.__dict__["_mineru_metadata"]["html_content"] = best_match["html"]
             
             enhanced_elements.append(enhanced_element)
         
@@ -764,15 +774,14 @@ class MinerUProcessor:
             
             # Look for title (prioritize elements marked as "title" type)
             if not extracted_title and element.type in ["title", "heading"]:
+                mineru_meta = getattr(element, '_mineru_metadata', {})
                 # For middle.json elements, trust the "title" type more
-                if (element.metadata and 
-                    element.metadata.get("source") == "mineru_middle_json" and
-                    element.metadata.get("original_type") == "title"):
+                if (mineru_meta.get("source") == "mineru_middle_json" and
+                    mineru_meta.get("original_type") == "title"):
                     extracted_title = element.content.strip()
                 # For model.json elements, trust category_id 0 (title)
-                elif (element.metadata and
-                      element.metadata.get("source") == "mineru_model_json" and
-                      element.metadata.get("category_id") == 0):
+                elif (mineru_meta.get("source") == "mineru_model_json" and
+                      mineru_meta.get("category_id") == 0):
                     extracted_title = element.content.strip()
                 elif element.type == "heading" and len(element.content.strip()) < 200:
                     extracted_title = element.content.strip()
@@ -1033,13 +1042,6 @@ class MinerUProcessor:
                         elif any(keyword in text_content.lower() for keyword in ['figure', 'fig.', 'table', 'tab.']):
                             element_type = 'caption'
                     
-                    # Create metadata
-                    metadata = {
-                        'source': 'mineru_content_list',
-                        'original_idx': idx,
-                        'original_type': item.get('type', 'unknown')
-                    }
-                    
                     element = MinerUElement(
                         type=element_type,
                         content=text_content,
@@ -1047,8 +1049,14 @@ class MinerUProcessor:
                         pageNumber=page_idx + 1,  # Convert 0-based to 1-based page numbering
                         hierarchy=None,
                         confidence=item.get('confidence', 0.9),  # High confidence for MinerU results
-                        metadata=metadata
+                        metadata=None
                     )
+                    # Store metadata as a custom attribute for our processing
+                    element.__dict__["_mineru_metadata"] = {
+                        'source': 'mineru_content_list',
+                        'original_idx': idx,
+                        'original_type': item.get('type', 'unknown')
+                    }
                     elements.append(element)
         
         logger.info(f"Converted {len(elements)} elements from MinerU content_list")
