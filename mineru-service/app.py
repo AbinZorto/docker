@@ -165,6 +165,60 @@ async def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(sec
         raise HTTPException(status_code=401, detail="Invalid API key")
     return True
 
+# This is the original parser that you confirmed was working.
+def _convert_mineru_content_list_to_elements(content_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    elements = []
+    for item in content_list:
+        try:
+            bbox_raw = item.get('bbox')
+            if not bbox_raw or len(bbox_raw) != 4:
+                continue
+
+            # Convert bbox from [x1, y1, x2, y2] to our format [x, y, width, height]
+            bbox = {
+                "x": bbox_raw[0],
+                "y": bbox_raw[1],
+                "width": bbox_raw[2] - bbox_raw[0],
+                "height": bbox_raw[3] - bbox_raw[1]
+            }
+
+            element = {
+                "id": f"{item.get('type', 'text')}-{item.get('page_idx', 0)}-{int(bbox['x'])}-{int(bbox['y'])}",
+                "type": item.get('type', 'text'),
+                "content": item.get('text', '').strip(),
+                "pageNumber": item.get('page_idx', 0) + 1,  # Assuming page_idx is 0-based
+                "x": bbox['x'],
+                "y": bbox['y'],
+                "width": bbox['width'],
+                "height": bbox['height'],
+                "confidence": item.get('confidence', 0.9),
+                "bbox": [bbox['x'], bbox['y'], bbox['width'], bbox['height']],
+            }
+            elements.append(element)
+        except Exception as e:
+            logger.warning(f"Skipping invalid item in content_list: {item}. Error: {e}")
+            continue
+    return elements
+
+def _build_sections_from_elements(elements: List[Dict[str, Any]]) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+    if not elements:
+        return None, []
+    
+    title = elements[0].get('content')
+    sections = []
+    
+    # Simple logic to group elements into a single "Body" section for now
+    body_section = {
+        "title": "Document Body",
+        "level": 1,
+        "content": "\n".join(el.get('content', '') for el in elements[1:]),
+        "elements": elements[1:]
+    }
+    sections.append(body_section)
+    
+    return title, sections
+
+
 # MinerU Processor using official command-line interface
 class MinerUProcessor:
     def __init__(self):
@@ -277,137 +331,38 @@ class MinerUProcessor:
     async def _parse_mineru_output(self, output_dir: Path, options: ProcessingOptions) -> ProcessingResponse:
         """Parse MinerU output files into our response format."""
         try:
-            # Find all relevant files like we used to
+            # Find all relevant files
             json_files = list(output_dir.rglob("*.json"))
             content_list_files = [f for f in json_files if "_content_list.json" in f.name]
             md_files = list(output_dir.rglob("*.md"))
             
             logger.info(f"Found {len(json_files)} JSON files, {len(content_list_files)} content_list files, and {len(md_files)} MD files in {output_dir}")
 
-            # Try to find the best JSON file to parse
-            primary_json_file = None
-            
-            # First preference: content_list files
-            if content_list_files:
-                primary_json_file = content_list_files[0]
-                logger.info(f"Using content_list file: {primary_json_file}")
-            # Second preference: any JSON file that's not content_list
-            elif json_files:
-                non_content_list = [f for f in json_files if "_content_list.json" not in f.name]
-                if non_content_list:
-                    primary_json_file = non_content_list[0]
-                    logger.info(f"Using non-content_list JSON file: {primary_json_file}")
-                else:
-                    primary_json_file = json_files[0]
-                    logger.info(f"Using first available JSON file: {primary_json_file}")
+            if not content_list_files:
+                raise FileNotFoundError("Could not find '*_content_list.json' in the output directory.")
 
-            if not primary_json_file:
-                raise FileNotFoundError("Could not find any JSON files in the output directory.")
-
-            # Parse the JSON file
-            async with aiofiles.open(primary_json_file, 'r', encoding='utf-8') as f:
+            json_file = content_list_files[0]
+            logger.info(f"Parsing content_list file: {json_file}")
+            async with aiofiles.open(json_file, 'r', encoding='utf-8') as f:
                 raw_data = json.loads(await f.read())
 
-            all_elements: List[MinerUElement] = []
+            all_elements_raw = _convert_mineru_content_list_to_elements(raw_data)
+            all_elements = [MinerUElement(**el) for el in all_elements_raw]
             
-            # Handle different JSON structures
-            if isinstance(raw_data, list):
-                # Direct list of elements (content_list format)
-                data_to_process = raw_data
-            elif isinstance(raw_data, dict):
-                # Check for common keys that might contain the elements
-                if 'elements' in raw_data:
-                    data_to_process = raw_data['elements']
-                elif 'content' in raw_data:
-                    data_to_process = raw_data['content']
-                elif 'pages' in raw_data:
-                    # Flatten pages structure
-                    data_to_process = []
-                    for page in raw_data['pages']:
-                        if isinstance(page, dict) and 'elements' in page:
-                            data_to_process.extend(page['elements'])
-                        elif isinstance(page, list):
-                            data_to_process.extend(page)
-                else:
-                    # Try to use the raw dict as a single element
-                    data_to_process = [raw_data]
-            else:
-                logger.warning(f"Unexpected JSON structure type: {type(raw_data)}")
-                data_to_process = []
+            title, sections_raw = _build_sections_from_elements(all_elements_raw)
+            sections = [Section(**s) for s in sections_raw]
 
-            logger.info(f"Processing {len(data_to_process)} potential elements from JSON")
-
-            for item in data_to_process:
-                if not isinstance(item, dict):
-                    continue
-                    
-                # Handle different bbox formats
-                bbox_raw = None
-                if 'bbox' in item:
-                    bbox_raw = item['bbox']
-                elif 'bounding_box' in item:
-                    bbox_raw = item['bounding_box']
-                elif all(k in item for k in ['x', 'y', 'width', 'height']):
-                    bbox_raw = [item['x'], item['y'], item['x'] + item['width'], item['y'] + item['height']]
-                elif all(k in item for k in ['left', 'top', 'right', 'bottom']):
-                    bbox_raw = [item['left'], item['top'], item['right'], item['bottom']]
-
-                if not bbox_raw or not isinstance(bbox_raw, list) or len(bbox_raw) != 4:
-                    continue
-
-                # Handle different text content keys
-                text_content = ""
-                for text_key in ['text', 'content', 'value', 'string']:
-                    if text_key in item and item[text_key]:
-                        text_content = str(item[text_key]).strip()
-                        break
-
-                if not text_content:
-                    continue
-
-                bbox = BoundingBox(
-                    x=bbox_raw[0],
-                    y=bbox_raw[1],
-                    width=bbox_raw[2] - bbox_raw[0],
-                    height=bbox_raw[3] - bbox_raw[1]
-                )
-
-                # Handle different page number keys
-                page_num = 1
-                for page_key in ['page_idx', 'page', 'page_number', 'pageNumber']:
-                    if page_key in item:
-                        page_num = int(item[page_key])
-                        if page_key == 'page_idx':  # 0-based
-                            page_num += 1
-                        break
-
-                element = MinerUElement(
-                    type=item.get('type', 'text'),
-                    content=text_content,
-                    bbox=bbox,
-                    pageNumber=page_num,
-                    confidence=item.get('confidence', 0.9),
-                    hierarchy=None, 
-                    metadata=None 
-                )
-                all_elements.append(element)
-            
-            logger.info(f"Successfully parsed {len(all_elements)} elements")
-            
-            title, sections = self._build_structure_from_elements(all_elements)
-            
-            # Try to get markdown from file if available
             markdown_content = ""
             if md_files:
                 try:
                     async with aiofiles.open(md_files[0], 'r', encoding='utf-8') as f:
                         markdown_content = await f.read()
-                    logger.info(f"Loaded markdown from file: {md_files[0]}")
-                except Exception as e:
-                    logger.warning(f"Could not read markdown file: {e}")
-                    markdown_content = self._generate_markdown(title, sections)
-            else:
-                markdown_content = self._generate_markdown(title, sections)
+                except Exception:
+                    # Fallback to generating from elements
+                    if title:
+                        markdown_content = f"# {title}\n\n"
+                    for section in sections:
+                        markdown_content += f"## {section['title']}\n\n{section['content']}\n\n"
 
             metadata = ProcessingMetadata(
                 totalPages=len(set(el.pageNumber for el in all_elements)) if all_elements else 1,
@@ -436,57 +391,6 @@ class MinerUProcessor:
                 ),
                 error=f"Failed to parse MinerU output: {e}"
             )
-            
-    def _build_structure_from_elements(self, elements: List[MinerUElement]) -> Tuple[Optional[str], List[Section]]:
-        import re
-        
-        if not elements:
-            return None, []
-
-        title = elements[0].content
-        sections: List[Section] = []
-        current_section_elements: List[MinerUElement] = []
-        
-        # Simple heading detection regex (e.g., "1. Introduction", "Abstract")
-        heading_regex = re.compile(r"^(?:[IVXLCDM]+\.|[0-9]+\.|\b(?:Abstract|Introduction|Conclusion|Discussion|Results|Methods|References))\b", re.IGNORECASE)
-
-        for el in elements[1:]: # Skip title
-            if heading_regex.match(el.content):
-                if current_section_elements:
-                    # Finalize previous section
-                    sections[-1].content = "\n".join(e.content for e in current_section_elements)
-                    sections[-1].elements = current_section_elements
-                
-                # Start new section
-                new_section = Section(
-                    title=el.content,
-                    level=1,
-                    content="",
-                    elements=[]
-                )
-                sections.append(new_section)
-                current_section_elements = []
-            else:
-                if sections:
-                    current_section_elements.append(el)
-
-        # Add the last section's content
-        if sections and current_section_elements:
-            sections[-1].content = "\n".join(e.content for e in current_section_elements)
-            sections[-1].elements = current_section_elements
-            
-        return title, sections
-
-    def _generate_markdown(self, title: Optional[str], sections: List[Section]) -> str:
-        md = ""
-        if title:
-            md += f"# {title}\n\n"
-        
-        for section in sections:
-            md += f"## {section.title}\n\n"
-            md += section.content + "\n\n"
-            
-        return md.strip()
 
 # Processor instance
 processor = MinerUProcessor()
