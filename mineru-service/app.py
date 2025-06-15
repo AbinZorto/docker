@@ -9,7 +9,7 @@ import json
 import base64
 from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
@@ -21,7 +21,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 # Check MinerU availability using command line tool (official method)
 def check_mineru_availability():
     try:
-        result = subprocess.run(['mineru', '--version'], capture_output=True, text=True, timeout=10)
+        result = subprocess.run(['mineru', '--version'], capture_output=True, text=True, timeout=300)
         if result.returncode == 0:
             version = result.stdout.strip() if result.stdout else "Unknown"
             logger.info(f"✅ MinerU command available: {version}")
@@ -30,8 +30,10 @@ def check_mineru_availability():
             logger.warning(f"❌ MinerU command failed: {result.stderr}")
             return False, "Command failed"
     except subprocess.TimeoutExpired:
-        logger.warning("❌ MinerU command timeout")
-        return False, "Timeout"
+        logger.warning("❌ MinerU command timeout (might be downloading models)")
+        # Return True if command times out - likely downloading models on first run
+        logger.info("⚠️ MinerU command timed out but proceeding anyway")
+        return True, "Available (timed out - likely downloading models)"
     except FileNotFoundError:
         logger.warning("❌ MinerU command not found")
         return False, "Not found"
@@ -214,7 +216,7 @@ class MinerUProcessor:
         return cmd
         
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-    async def process_pdf(self, pdf_path: str, options: ProcessingOptions) -> ProcessingResponse:
+    async def process_pdf(self, pdf_path: str, options: ProcessingOptions, force: bool = False) -> ProcessingResponse:
         """Process PDF using MinerU command-line tool"""
         start_time = datetime.now()
         
@@ -279,13 +281,34 @@ class MinerUProcessor:
         sections = []
         
         try:
-            # Look for MinerU output files (typically JSON and markdown)
-            json_files = list(output_dir.glob("*.json"))
-            md_files = list(output_dir.glob("*.md"))
+            # Log all files in output directory for debugging
+            all_files = list(output_dir.rglob("*"))
+            logger.info(f"Files in output directory {output_dir}:")
+            for file in all_files:
+                logger.info(f"  {file.relative_to(output_dir)} ({'dir' if file.is_dir() else 'file'})")
             
-            # Parse JSON output if available
-            if json_files:
+            # Look for MinerU output files (typically JSON and markdown)
+            json_files = list(output_dir.rglob("*.json"))  # Use rglob to search subdirectories
+            md_files = list(output_dir.rglob("*.md"))
+            
+            # Prioritize content_list.json files which contain the structured content
+            content_list_files = list(output_dir.rglob("*_content_list.json"))
+            
+            logger.info(f"Found {len(json_files)} JSON files, {len(content_list_files)} content_list files, and {len(md_files)} MD files")
+            
+            # Parse content_list.json output if available (preferred)
+            if content_list_files:
+                json_file = content_list_files[0]  # Take first content_list file
+                logger.info(f"Using content_list file: {json_file}")
+                async with aiofiles.open(json_file, 'r', encoding='utf-8') as f:
+                    content = await f.read()
+                    data = json.loads(content)
+                    elements = self._convert_mineru_content_list_to_elements(data)
+                    sections = self._build_sections_from_elements(elements)
+            # Fallback to other JSON files
+            elif json_files:
                 json_file = json_files[0]  # Take first JSON file
+                logger.info(f"Using JSON file: {json_file}")
                 async with aiofiles.open(json_file, 'r', encoding='utf-8') as f:
                     content = await f.read()
                     data = json.loads(content)
@@ -347,6 +370,31 @@ class MinerUProcessor:
                     documentType="unknown"
                 )
             )
+    
+    def _convert_mineru_content_list_to_elements(self, data) -> List[MinerUElement]:
+        """Convert MinerU content_list JSON output to our element format"""
+        elements = []
+        
+        if isinstance(data, list):
+            for idx, item in enumerate(data):
+                if isinstance(item, dict):
+                    element_type = item.get('type', 'text')
+                    text_content = item.get('text', '').strip()
+                    page_idx = item.get('page_idx', 0)
+                    
+                    if text_content:  # Only add non-empty content
+                        element = MinerUElement(
+                            type=element_type,
+                            content=text_content,
+                            bbox=BoundingBox(x=0.0, y=0.0, width=0.0, height=0.0),
+                            pageNumber=page_idx + 1,  # Convert 0-based to 1-based page numbering
+                            hierarchy=None,
+                            confidence=0.9,  # High confidence for MinerU results
+                            metadata={"source": "mineru_content_list", "original_idx": idx}
+                        )
+                        elements.append(element)
+        
+        return elements
     
     def _convert_mineru_json_to_elements(self, data: Dict) -> List[MinerUElement]:
         """Convert MinerU JSON output to our element format"""
@@ -451,7 +499,8 @@ async def get_status():
 async def process_pdf(
     background_tasks: BackgroundTasks,
     pdf: UploadFile = File(...),
-    options: str = '{}',
+    options: str = Form('{}'),
+    force: str = Form('false'),
     _auth: bool = Depends(verify_api_key)
 ):
     """Process PDF with MinerU"""
@@ -476,12 +525,17 @@ async def process_pdf(
         raise HTTPException(status_code=400, detail=f"Invalid options: {e}")
     
     # Check cache
+    force_reprocess = force.lower() == 'true'
     cache_key = get_cache_key(content + options.encode())
-    cached_result = await get_cached_result(cache_key)
-    if cached_result:
-        logger.info("Returning cached result")
-        return cached_result
-    
+
+    if not force_reprocess:
+        cached_result = await get_cached_result(cache_key)
+        if cached_result:
+            logger.info(f"Returning cached result for cache key: {cache_key}")
+            return cached_result
+    else:
+        logger.info(f"Force re-analysis for cache key: {cache_key}. Bypassing cache.")
+
     # Save uploaded file temporarily
     temp_pdf = None
     try:
@@ -490,7 +544,7 @@ async def process_pdf(
             temp_pdf = f.name
         
         # Process with MinerU
-        result = await processor.process_pdf(temp_pdf, processing_options)
+        result = await processor.process_pdf(temp_pdf, processing_options, force_reprocess)
         
         # Cache result
         background_tasks.add_task(cache_result, cache_key, result)
@@ -524,4 +578,4 @@ async def process_pdf(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    uvicorn.run(app, host="0.0.0.0", port=8000)
