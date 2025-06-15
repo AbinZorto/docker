@@ -536,7 +536,7 @@ class MinerUProcessor:
                                 elements.append(element)
         
         # Sort elements by page and block index for proper order
-        elements.sort(key=lambda x: (x.pageNumber, x.metadata.get("block_index", 0) if x.metadata else 0))
+        elements.sort(key=lambda x: (x.pageNumber, getattr(x, '_mineru_metadata', {}).get("block_index", 0)))
         
         logger.info(f"Converted {len(elements)} elements from MinerU middle JSON")
         return elements
