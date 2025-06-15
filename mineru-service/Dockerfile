@@ -38,22 +38,19 @@ WORKDIR /app
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
 
-# Install pip and upgrade
-RUN python3 -m pip install --upgrade pip setuptools wheel
+# Install pip and uv (following official MinerU installation guide)
+RUN python3 -m pip install --upgrade pip
+RUN pip install uv
 
 # Install basic Python dependencies first
 COPY requirements.txt .
-RUN pip3 install --no-cache-dir -r requirements.txt
+RUN uv pip install --system --no-cache -r requirements.txt
 
-# Install MinerU using the correct method
-# First install the base dependencies
-RUN pip3 install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+# Install MinerU using the EXACT method from official docs
+RUN uv pip install --system -U "mineru[core]"
 
-# Install MinerU from git source (more reliable than pypi for latest version)
-RUN pip3 install --no-cache-dir git+https://github.com/opendatalab/MinerU.git
-
-# Alternative: Install from PyPI if git method fails
-# RUN pip3 install --no-cache-dir magic-pdf[full-cpu]
+# For GPU support with sglang acceleration (uncomment if using GPU droplets)
+# RUN uv pip install --system -U "mineru[all]"
 
 # Copy application code
 COPY . .
@@ -72,4 +69,4 @@ HEALTHCHECK --interval=30s --timeout=30s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 # Start command
-CMD ["./start.sh"] 
+CMD ["./start.sh"]
