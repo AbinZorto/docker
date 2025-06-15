@@ -242,10 +242,16 @@ class MinerUProcessor:
             
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)  # 5 minute timeout
             
+            # Log stdout and stderr for debugging
+            if stdout:
+                logger.info(f"MinerU stdout: {stdout.decode()}")
+            if stderr:
+                logger.warning(f"MinerU stderr: {stderr.decode()}")
+            
             if process.returncode != 0:
                 error_msg = stderr.decode() if stderr else "Unknown error"
-                logger.error(f"MinerU command failed: {error_msg}")
-                raise ValueError(f"MinerU processing failed: {error_msg}")
+                logger.error(f"MinerU command failed with return code {process.returncode}: {error_msg}")
+                raise ValueError(f"MinerU processing failed (code {process.returncode}): {error_msg}")
             
             # Parse MinerU output
             result = await self._parse_mineru_output(output_dir, options)
@@ -494,8 +500,23 @@ async def process_pdf(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Processing error: {e}")
-        raise HTTPException(status_code=500, detail="Internal processing error")
+        # Handle RetryError specifically to get underlying exception details
+        if hasattr(e, 'last_attempt') and hasattr(e.last_attempt, 'exception'):
+            underlying_error = e.last_attempt.exception()
+            logger.error(f"Processing error (after {e.last_attempt.attempt_number} retries): {underlying_error}")
+            logger.error(f"Underlying error type: {type(underlying_error).__name__}")
+            if isinstance(underlying_error, HTTPException):
+                raise underlying_error
+            else:
+                import traceback
+                logger.error(f"Full underlying traceback: {traceback.format_exception(type(underlying_error), underlying_error, underlying_error.__traceback__)}")
+                raise HTTPException(status_code=500, detail=f"Processing failed: {str(underlying_error)}")
+        else:
+            logger.error(f"Processing error: {e}")
+            logger.error(f"Error type: {type(e).__name__}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
+            raise HTTPException(status_code=500, detail=f"Internal processing error: {str(e)}")
     finally:
         # Cleanup
         if temp_pdf and os.path.exists(temp_pdf):
