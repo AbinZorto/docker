@@ -51,6 +51,12 @@ RUN uv pip install --system --no-cache -r requirements.txt
 # Install PyTorch with CUDA support first (specific versions for compatibility)
 RUN uv pip install --system torch==2.1.0 torchvision==0.16.0 --index-url https://download.pytorch.org/whl/cu118
 
+# CRITICAL FIX: Pin NumPy to 1.x for VLM compatibility
+RUN uv pip install --system "numpy<2.0"
+
+# Install OpenCV compatible with NumPy 1.x
+RUN uv pip install --system "opencv-python<4.10"
+
 # Install MinerU CORE (no [all] extras to avoid sglang/flashinfer)
 RUN uv pip install --system -U mineru
 
