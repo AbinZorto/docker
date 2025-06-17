@@ -1,88 +1,65 @@
-# Use NVIDIA CUDA runtime with cuDNN for optimized inference
-FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+# Use NVIDIA CUDA base image with matching versions
+FROM nvidia/cuda:12.1-devel-ubuntu22.04
 
 # Set environment variables
-ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV NVIDIA_VISIBLE_DEVICES=all
-ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies (runtime-focused) and clean up in same layer
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
-    python3.10 \
-    python3.10-dev \
+    python3 \
     python3-pip \
-    python3.10-venv \
+    python3-dev \
     git \
     wget \
     curl \
-    libssl-dev \
-    libffi-dev \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    libgcc-s1 \
     libjpeg-dev \
     libpng-dev \
-    libtiff-dev \
-    libwebp-dev \
-    libopencv-dev \
-    tesseract-ocr \
-    tesseract-ocr-eng \
-    poppler-utils \
-    libpoppler-cpp-dev \
-    libmagic1 \
-    libmagic-dev \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean \
-    && apt-get autoremove -y
+    redis-server \
+    && rm -rf /var/lib/apt/lists/*
 
-# Create app directory
+# Create working directory
 WORKDIR /app
 
-# Set Python 3.10 as default
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
+# Install PyTorch with CUDA 12.1 support (matching base image)
+RUN pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
-# Install pip and uv
-RUN python3 -m pip install --upgrade pip && pip install uv
+# Install MinerU with all backends
+RUN pip3 install mineru[full]==2.0.5
 
-# SPACE-SAVING: Install dependencies in order of importance, clean cache between
-# Install PyTorch with CUDA support first (clean after each major install)
-RUN uv pip install --system torch==2.1.0 torchvision==0.16.0 --index-url https://download.pytorch.org/whl/cu118 \
-    && rm -rf ~/.cache/uv /tmp/*
+# Install missing pipeline dependencies
+RUN pip3 install \
+    fast-langdetect \
+    doclayout-yolo \
+    ultralytics \
+    yolo-nas \
+    super-gradients
 
-# CRITICAL FIX: Pin NumPy to 1.x for VLM compatibility
-RUN uv pip install --system "numpy<2.0" "opencv-python<4.10" \
-    && rm -rf ~/.cache/uv /tmp/*
+# Install API dependencies
+RUN pip3 install \
+    fastapi \
+    uvicorn \
+    python-multipart \
+    redis \
+    python-magic \
+    pillow \
+    numpy
 
-# Install MinerU and essential backends (clean cache immediately)
-RUN uv pip install --system -U mineru transformers accelerate \
-    && rm -rf ~/.cache/uv /tmp/*
-
-# Install GPU detection dependencies and FastAPI stack with all common requirements
-RUN uv pip install --system \
-    pynvml py3nvml nvidia-ml-py3 \
-    fastapi uvicorn redis pillow \
-    aiofiles python-multipart tenacity pydantic \
-    requests httpx typing-extensions \
-    && rm -rf ~/.cache/uv /tmp/*
-
-# Copy application code
-COPY . .
-
-# Create necessary directories and set permissions in one layer
-RUN mkdir -p /app/uploads /app/outputs /app/cache /app/logs /app/models \
-    && chmod +x /app/start.sh
-
-# CRITICAL: Set environment variables for GPU detection
-ENV CUDA_VISIBLE_DEVICES=0
-ENV TORCH_CUDA_ARCH_LIST="7.5"
-ENV FORCE_CUDA=1
+# Copy application files
+COPY . /app/
 
 # Expose port
 EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=30s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+# Start script
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
 
-# Start command
-CMD ["./start.sh"]
+CMD ["/app/start.sh"]
