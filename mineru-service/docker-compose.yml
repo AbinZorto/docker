@@ -1,37 +1,64 @@
+version: "3.8"
 services:
   mineru-api:
     build: .
     ports:
       - "8000:8000"
     environment:
+      # Your existing environment variables (preserved)
       - MINERU_API_KEY=${MINERU_API_KEY:-cbe9f548-54fe-4e9c-ada6-15291466d213}
       - REDIS_URL=redis://redis:6379
       - MAX_FILE_SIZE=100
       - CACHE_TTL=7200
       - DEBUG=false
       - DOMAIN=${DOMAIN:-mineru.writemine.com}
+      
+      # NEW: GPU-specific environment variables
+      - MINERU_DEVICE=cuda
+      - MINERU_BACKEND=vlm-transformers
+      - NVIDIA_VISIBLE_DEVICES=all
     volumes:
+      # Your existing volumes (preserved)
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
       - ./cache:/app/cache
+      
+      # NEW: Model storage volume for GPU models
+      - mineru_models:/app/models
     depends_on:
       - redis
     restart: unless-stopped
+    
+    # Your existing healthcheck (preserved)
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 60s
+    
+    # NEW: GPU configuration
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
   redis:
-    image: redis:7.2-alpine
+    image: redis:7.2-alpine  # Your version preserved
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
     restart: unless-stopped
-    command: redis-server --appendonly yes
+    
+    # Redis uses system RAM (not VRAM), so we can be more generous
+    # T4 has 16GB VRAM (separate) + 16GB system RAM
+    # Allocating 2GB for Redis cache leaves 14GB system RAM for MinerU app/files
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
 
 volumes:
-  redis_data:
+  redis_data:      # Your existing volume
+  mineru_models:   # NEW: For GPU model storage
