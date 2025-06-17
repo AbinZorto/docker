@@ -57,8 +57,12 @@ RUN uv pip install --system "numpy<2.0" "opencv-python<4.10" \
 RUN uv pip install --system -U mineru transformers accelerate \
     && rm -rf ~/.cache/uv /tmp/*
 
-# Install GPU detection dependencies and FastAPI stack
-RUN uv pip install --system pynvml py3nvml nvidia-ml-py3 fastapi uvicorn redis pillow aiofiles python-multipart \
+# Install GPU detection dependencies and FastAPI stack with all common requirements
+RUN uv pip install --system \
+    pynvml py3nvml nvidia-ml-py3 \
+    fastapi uvicorn redis pillow \
+    aiofiles python-multipart tenacity pydantic \
+    requests httpx typing-extensions \
     && rm -rf ~/.cache/uv /tmp/*
 
 # Copy application code
