@@ -1,42 +1,82 @@
-# Core FastAPI dependencies
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-python-multipart==0.0.6
-pydantic==2.5.0
-pydantic-settings==2.1.0
-aiofiles==23.2.1
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
-redis==5.0.1
-celery==5.3.4
-requests==2.31.0
-httpx==0.25.2
-tenacity==8.2.3
-loguru==0.7.2
-
-# Basic image processing and scientific computing
-pillow==10.1.0
-numpy==1.25.2
-opencv-python==4.8.1.78
-
-# Additional dependencies for MinerU
-setuptools
-wheel
-python-magic
-transformers
-nltk
-scikit-learn
-scipy
-matplotlib
-
-# NEW: GPU-specific dependencies
+# ===== PyTorch with CUDA 12.1 support =====
+--index-url https://download.pytorch.org/whl/cu121
 torch>=2.0.0
 torchvision>=0.15.0
-accelerate
-transformers[torch]
+torchaudio>=2.0.0
 
-# CUDA support for image processing
-cupy-cuda11x  # For CUDA 11.x compatibility
+# ===== Core MinerU with all backends =====
+mineru[full]==2.0.5
 
-# MinerU and its dependencies will be installed via pip in Dockerfile
-# This approach ensures we get the official MinerU with all its dependencies
+# ===== Pipeline backend dependencies =====
+fast-langdetect>=0.4.6
+doclayout-yolo>=0.0.2
+ultralytics>=8.0.0
+yolo-nas>=1.0.0
+super-gradients>=3.5.0
+
+# ===== Computer Vision & AI Models =====
+opencv-python>=4.8.0
+Pillow>=9.5.0
+numpy>=1.24.0
+scipy>=1.10.0
+scikit-image>=0.20.0
+transformers>=4.30.0
+huggingface-hub>=0.15.0
+
+# ===== OCR & Text Processing =====
+pytesseract>=0.3.10
+easyocr>=1.7.0
+paddlepaddle>=2.5.0
+paddleocr>=2.7.0
+
+# ===== PDF Processing =====
+PyMuPDF>=1.23.0
+pypdf>=3.0.0
+pdfplumber>=0.9.0
+pdf2image>=1.16.0
+
+# ===== API Framework =====
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+python-multipart>=0.0.6
+pydantic>=2.0.0
+starlette>=0.27.0
+
+# ===== Database & Caching =====
+redis>=4.5.0
+python-redis>=0.1.4
+
+# ===== File Processing =====
+python-magic>=0.4.27
+filetype>=1.2.0
+
+# ===== Utilities & Logging =====
+click>=8.1.0
+loguru>=0.7.0
+rich>=13.0.0
+tqdm>=4.65.0
+requests>=2.31.0
+aiofiles>=23.0.0
+
+# ===== Development & Testing =====
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+httpx>=0.24.0
+
+# ===== Additional ML Dependencies =====
+accelerate>=0.20.0
+safetensors>=0.3.0
+tokenizers>=0.13.0
+sentencepiece>=0.1.99
+
+# ===== Image & Document Layout Analysis =====
+layoutparser>=0.3.4
+detectron2>=0.6.0
+
+# ===== Language Detection & NLP =====
+langdetect>=1.0.9
+polyglot>=16.7.4
+
+# ===== System & Performance =====
+psutil>=5.9.0
+memory-profiler>=0.60.0
