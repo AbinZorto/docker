@@ -60,9 +60,6 @@ RUN uv pip install --system transformers accelerate
 # Install GPU detection dependencies (CRITICAL for VRAM detection fix)
 RUN uv pip install --system pynvml py3nvml nvidia-ml-py3
 
-# Add document processing optimizations for T4
-RUN uv pip install --system torch-audio ultralytics
-
 # Copy application code
 COPY . .
 
