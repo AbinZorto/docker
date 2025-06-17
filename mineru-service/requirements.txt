@@ -29,5 +29,14 @@ scikit-learn
 scipy
 matplotlib
 
+# NEW: GPU-specific dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+accelerate
+transformers[torch]
+
+# CUDA support for image processing
+cupy-cuda11x  # For CUDA 11.x compatibility
+
 # MinerU and its dependencies will be installed via pip in Dockerfile
-# This approach ensures we get the official MinerU with all its dependencies 
+# This approach ensures we get the official MinerU with all its dependencies
