@@ -50,6 +50,11 @@ class Settings(BaseModel):
     max_file_size: int = int(os.getenv("MAX_FILE_SIZE", "50")) * 1024 * 1024  # 50MB default
     cache_ttl: int = int(os.getenv("CACHE_TTL", "3600"))  # 1 hour default
     debug: bool = os.getenv("DEBUG", "false").lower() == "true"
+    
+    # NEW: GPU-specific settings from environment variables
+    mineru_device: str = os.getenv("MINERU_DEVICE", "cpu")
+    mineru_backend: str = os.getenv("MINERU_BACKEND", "pipeline")
+    model_cache_dir: str = os.getenv("MODEL_CACHE_DIR", "/app/models")
 
 settings = Settings()
 
@@ -85,13 +90,13 @@ except Exception as e:
 class ProcessingOptions(BaseModel):
     # Core MinerU options (matching CLI parameters from README)
     method: str = Field(default="auto", description="Processing method: auto, txt, ocr")
-    backend: str = Field(default="pipeline", description="Backend: pipeline, vlm-transformers, vlm-sglang-engine")
+    backend: str = Field(default=settings.mineru_backend, description="Backend: pipeline, vlm-transformers, vlm-sglang-engine")  # Use env default
     lang: Optional[str] = Field(default=None, description="Document language for OCR accuracy")
     start_page: Optional[int] = Field(default=None, description="Starting page (0-based)")
     end_page: Optional[int] = Field(default=None, description="Ending page (0-based)")
     formula: bool = Field(default=True, description="Enable formula parsing")
     table: bool = Field(default=True, description="Enable table parsing")
-    device: str = Field(default="cpu", description="Inference device: cpu, cuda, cuda:0, npu, mps")
+    device: str = Field(default=settings.mineru_device, description="Inference device: cpu, cuda, cuda:0, npu, mps")  # Use env default
     vram: Optional[int] = Field(default=None, description="Max GPU VRAM usage per process (MB)")
     model_source: str = Field(default="huggingface", description="Model source: huggingface, modelscope, local")
     
@@ -105,7 +110,6 @@ class ProcessingOptions(BaseModel):
     extractImages: Optional[bool] = Field(default=None, description="Legacy: use extract_images")
     outputFormat: Optional[str] = Field(default=None, description="Legacy: use output_format")
     
-    # Add at the end:
     force: bool = Field(default=False, description="Force reprocessing, ignore cache")
 
 class BoundingBox(BaseModel):
