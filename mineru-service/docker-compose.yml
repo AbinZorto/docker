@@ -17,6 +17,7 @@ services:
       - MINERU_DEVICE=cuda
       - MINERU_BACKEND=vlm-transformers
       - NVIDIA_VISIBLE_DEVICES=all
+      - MODEL_CACHE_DIR=/app/models
     volumes:
       # Your existing volumes (preserved)
       - ./uploads:/app/uploads
@@ -56,8 +57,8 @@ services:
     
     # Redis uses system RAM (not VRAM), so we can be more generous
     # T4 has 16GB VRAM (separate) + 16GB system RAM
-    # Allocating 2GB for Redis cache leaves 14GB system RAM for MinerU app/files
-    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    # Allocating 4GB for Redis cache leaves 12GB system RAM for MinerU app/files
+    command: redis-server --appendonly yes --maxmemory 4gb --maxmemory-policy allkeys-lru
 
 volumes:
   redis_data:      # Your existing volume
