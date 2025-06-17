@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
-# Install system dependencies (runtime-focused)
+# Install system dependencies (runtime-focused) and clean up in same layer
 RUN apt-get update && apt-get install -y \
     python3.10 \
     python3.10-dev \
@@ -31,7 +31,8 @@ RUN apt-get update && apt-get install -y \
     libmagic1 \
     libmagic-dev \
     && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+    && apt-get clean \
+    && apt-get autoremove -y
 
 # Create app directory
 WORKDIR /app
@@ -41,39 +42,31 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
 
 # Install pip and uv
-RUN python3 -m pip install --upgrade pip
-RUN pip install uv
+RUN python3 -m pip install --upgrade pip && pip install uv
 
-# Install basic Python dependencies first
-COPY requirements.txt .
-RUN uv pip install --system --no-cache -r requirements.txt
-
-# Install PyTorch with CUDA support first (specific versions for compatibility)
-RUN uv pip install --system torch==2.1.0 torchvision==0.16.0 --index-url https://download.pytorch.org/whl/cu118
+# SPACE-SAVING: Install dependencies in order of importance, clean cache between
+# Install PyTorch with CUDA support first (clean after each major install)
+RUN uv pip install --system torch==2.1.0 torchvision==0.16.0 --index-url https://download.pytorch.org/whl/cu118 \
+    && rm -rf ~/.cache/uv /tmp/*
 
 # CRITICAL FIX: Pin NumPy to 1.x for VLM compatibility
-RUN uv pip install --system "numpy<2.0"
+RUN uv pip install --system "numpy<2.0" "opencv-python<4.10" \
+    && rm -rf ~/.cache/uv /tmp/*
 
-# Install OpenCV compatible with NumPy 1.x
-RUN uv pip install --system "opencv-python<4.10"
+# Install MinerU and essential backends (clean cache immediately)
+RUN uv pip install --system -U mineru transformers accelerate \
+    && rm -rf ~/.cache/uv /tmp/*
 
-# Install MinerU CORE (no [all] extras to avoid sglang/flashinfer)
-RUN uv pip install --system -U mineru
-
-# Install ONLY the backends you need for T4 efficiency
-RUN uv pip install --system transformers accelerate
-
-# Install GPU detection dependencies (CRITICAL for VRAM detection fix)
-RUN uv pip install --system pynvml py3nvml nvidia-ml-py3
+# Install GPU detection dependencies and FastAPI stack
+RUN uv pip install --system pynvml py3nvml nvidia-ml-py3 fastapi uvicorn redis pillow \
+    && rm -rf ~/.cache/uv /tmp/*
 
 # Copy application code
 COPY . .
 
-# Create necessary directories
-RUN mkdir -p /app/uploads /app/outputs /app/cache /app/logs /app/models
-
-# Set permissions
-RUN chmod +x /app/start.sh
+# Create necessary directories and set permissions in one layer
+RUN mkdir -p /app/uploads /app/outputs /app/cache /app/logs /app/models \
+    && chmod +x /app/start.sh
 
 # CRITICAL: Set environment variables for GPU detection
 ENV CUDA_VISIBLE_DEVICES=0
