@@ -58,7 +58,7 @@ RUN uv pip install --system -U mineru transformers accelerate \
     && rm -rf ~/.cache/uv /tmp/*
 
 # Install GPU detection dependencies and FastAPI stack
-RUN uv pip install --system pynvml py3nvml nvidia-ml-py3 fastapi uvicorn redis pillow \
+RUN uv pip install --system pynvml py3nvml nvidia-ml-py3 fastapi uvicorn redis pillow aiofiles python-multipart \
     && rm -rf ~/.cache/uv /tmp/*
 
 # Copy application code
