@@ -40,7 +40,7 @@ WORKDIR /app
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
 
-# Install pip and uv (following official MinerU installation guide)
+# Install pip and uv
 RUN python3 -m pip install --upgrade pip
 RUN pip install uv
 
@@ -51,11 +51,17 @@ RUN uv pip install --system --no-cache -r requirements.txt
 # Install PyTorch with CUDA support first (specific versions for compatibility)
 RUN uv pip install --system torch==2.1.0 torchvision==0.16.0 --index-url https://download.pytorch.org/whl/cu118
 
-# Install MinerU with GPU support (all backends including vlm-transformers)
-RUN uv pip install --system -U "mineru[all]"
+# Install MinerU CORE (no [all] extras to avoid sglang/flashinfer)
+RUN uv pip install --system -U mineru
 
-# CRITICAL FIX: Install additional GPU detection dependencies
+# Install ONLY the backends you need for T4 efficiency
+RUN uv pip install --system transformers accelerate
+
+# Install GPU detection dependencies (CRITICAL for VRAM detection fix)
 RUN uv pip install --system pynvml py3nvml nvidia-ml-py3
+
+# Add document processing optimizations for T4
+RUN uv pip install --system torch-audio ultralytics
 
 # Copy application code
 COPY . .
