@@ -23,8 +23,8 @@ RUN apt-get update && apt-get install -y \
     libxext6 \
     && rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip (SGLang base already has Python/pip)
-RUN python3 -m pip install --upgrade pip setuptools wheel
+# Upgrade pip with system packages override (required for Ubuntu 24.04)
+RUN python3 -m pip install --upgrade --break-system-packages pip setuptools wheel
 
 # Create working directory
 WORKDIR /app
@@ -32,8 +32,8 @@ WORKDIR /app
 # Copy requirements first for better caching
 COPY requirements.txt /app/requirements.txt
 
-# Install Python dependencies
-RUN pip3 install -r requirements.txt
+# Install Python dependencies with system packages override
+RUN pip3 install --break-system-packages -r requirements.txt
 
 # Copy application files
 COPY . /app/
