@@ -12,12 +12,15 @@ RUN apt-get update && apt-get install -y \
     poppler-utils \
     tesseract-ocr \
     tesseract-ocr-eng \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     libjpeg-dev \
     libpng-dev \
     libfreetype6-dev \
     libffi-dev \
+    libglu1-mesa \
+    libxrender1 \
+    libxext6 \
     && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip (SGLang base already has Python/pip)
