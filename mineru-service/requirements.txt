@@ -1,11 +1,8 @@
-# ===== PyTorch with CUDA 12.1 support =====
---index-url https://download.pytorch.org/whl/cu121
-torch>=2.0.0
-torchvision>=0.15.0
-torchaudio>=2.0.0
+# ===== Core MinerU with ALL backends (includes sglang acceleration) =====
+mineru[all]==2.0.5
 
-# ===== Core MinerU with all backends =====
-mineru[full]==2.0.5
+# ===== SGLang acceleration (may already be in base image) =====
+sglang>=0.4.7
 
 # ===== Pipeline backend dependencies =====
 fast-langdetect>=0.4.6
