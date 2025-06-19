@@ -51,9 +51,10 @@ class Settings(BaseModel):
     cache_ttl: int = int(os.getenv("CACHE_TTL", "3600"))  # 1 hour default
     debug: bool = os.getenv("DEBUG", "false").lower() == "true"
     
-    # NEW: GPU-specific settings from environment variables
-    mineru_device: str = os.getenv("MINERU_DEVICE", "cpu")
-    mineru_backend: str = os.getenv("MINERU_BACKEND", "pipeline")
+    # 🚀 NEW: SGLang client settings
+    mineru_device: str = os.getenv("MINERU_DEVICE", "cuda")  # Default to cuda for SGLang
+    mineru_backend: str = os.getenv("MINERU_BACKEND", "vlm-sglang-client")  # Default to SGLang client
+    sglang_url: str = os.getenv("SGLANG_URL", "http://127.0.0.1:30000")  # SGLang server URL
     model_cache_dir: str = os.getenv("MODEL_CACHE_DIR", "/app/models")
 
 settings = Settings()
@@ -61,7 +62,7 @@ settings = Settings()
 # FastAPI app
 app = FastAPI(
     title="MinerU PDF Processing Service",
-    description="Advanced PDF processing service for research papers using MinerU",
+    description="Advanced PDF processing service for research papers using MinerU with SGLang acceleration",
     version="1.0.0"
 )
 
@@ -90,7 +91,7 @@ except Exception as e:
 class ProcessingOptions(BaseModel):
     # Core MinerU options (matching CLI parameters from README)
     method: str = Field(default="auto", description="Processing method: auto, txt, ocr")
-    backend: str = Field(default=settings.mineru_backend, description="Backend: pipeline, vlm-transformers, vlm-sglang-engine")  # Use env default
+    backend: str = Field(default=settings.mineru_backend, description="Backend: pipeline, vlm-transformers, vlm-sglang-engine, vlm-sglang-client")  # Updated with sglang-client
     lang: Optional[str] = Field(default=None, description="Document language for OCR accuracy")
     start_page: Optional[int] = Field(default=None, description="Starting page (0-based)")
     end_page: Optional[int] = Field(default=None, description="Ending page (0-based)")
@@ -99,6 +100,9 @@ class ProcessingOptions(BaseModel):
     device: str = Field(default=settings.mineru_device, description="Inference device: cpu, cuda, cuda:0, npu, mps")  # Use env default
     vram: Optional[int] = Field(default=None, description="Max GPU VRAM usage per process (MB)")
     model_source: str = Field(default="huggingface", description="Model source: huggingface, modelscope, local")
+    
+    # 🚀 NEW: SGLang client options
+    sglang_url: str = Field(default=settings.sglang_url, description="SGLang server URL")
     
     # Output options
     output_format: str = Field(default="both", description="Output format: json, markdown, or both")
@@ -172,6 +176,23 @@ async def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(sec
         raise HTTPException(status_code=401, detail="Invalid API key")
     return True
 
+# 🚀 SGLang server health check
+async def check_sglang_server(url: str) -> bool:
+    """Check if SGLang server is available"""
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{url}/get_server_info", timeout=5) as response:
+                return response.status == 200
+    except:
+        try:
+            # Fallback to curl/requests
+            import requests
+            response = requests.get(f"{url}/get_server_info", timeout=5)
+            return response.status_code == 200
+        except:
+            return False
+
 # MinerU Processor using official command-line interface
 class MinerUProcessor:
     def __init__(self):
@@ -186,9 +207,14 @@ class MinerUProcessor:
         if options.method and options.method != "auto":
             cmd.extend(['-m', options.method])
         
-        # Add backend
+        # 🚀 Add backend (prioritize SGLang client)
         if options.backend and options.backend != "pipeline":
             cmd.extend(['-b', options.backend])
+            
+            # 🚀 Add SGLang URL for client mode
+            if options.backend == "vlm-sglang-client":
+                cmd.extend(['-u', options.sglang_url])
+                logger.info(f"🚀 Using SGLang client with server: {options.sglang_url}")
             
         # Add language for OCR accuracy
         if options.lang:
@@ -208,12 +234,12 @@ class MinerUProcessor:
         if not options.table:
             cmd.extend(['-t', 'false'])
             
-        # Add device
-        if options.device and options.device != "cpu":
+        # Add device (only needed for non-client backends)
+        if options.device and options.device != "cpu" and options.backend != "vlm-sglang-client":
             cmd.extend(['-d', options.device])
             
-        # Add VRAM limit
-        if options.vram:
+        # Add VRAM limit (only for non-client backends)
+        if options.vram and options.backend != "vlm-sglang-client":
             cmd.extend(['--vram', str(options.vram)])
             
         # Add model source
@@ -229,6 +255,15 @@ class MinerUProcessor:
         
         if not MINERU_AVAILABLE:
             raise HTTPException(status_code=503, detail="MinerU not available")
+        
+        # 🚀 Check SGLang server if using client mode
+        if options.backend == "vlm-sglang-client":
+            sglang_available = await check_sglang_server(options.sglang_url)
+            if not sglang_available:
+                logger.warning(f"SGLang server not available at {options.sglang_url}, falling back to vlm-sglang-engine")
+                options.backend = "vlm-sglang-engine"
+            else:
+                logger.info(f"✅ SGLang server available at {options.sglang_url}")
         
         # Create temporary output directory
         output_dir = self.temp_dir / f"output_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
@@ -268,7 +303,7 @@ class MinerUProcessor:
             processing_time = (datetime.now() - start_time).total_seconds() * 1000
             result.metadata.processingTimeMs = int(processing_time)
             
-            logger.info(f"Processing completed in {processing_time:.0f}ms")
+            logger.info(f"🚀 Processing completed in {processing_time:.0f}ms using backend: {options.backend}")
             return result
             
         except asyncio.TimeoutError:
@@ -865,8 +900,8 @@ class MinerUProcessor:
         heading_patterns = [
             r'^\d+\.?\s+[A-Z]',  # "1. Introduction" or "1 Introduction"
             r'^\d+\.\d+\.?\s+[A-Z]',  # "1.1 Background" 
-            r'^[A-Z][A-Z\s]{5,50}$',  # "INTRODUCTION", "RELATED WORK"
-            r'^[A-Z][a-z]+(\s[A-Z][a-z]*)*$',  # "Introduction", "Related Work"
+            r'^[A-Z][A-Z\s]{5,50}',  # "INTRODUCTION", "RELATED WORK"
+            r'^[A-Z][a-z]+(\s[A-Z][a-z]*)*',  # "Introduction", "Related Work"
         ]
         
         import re
@@ -1102,27 +1137,34 @@ async def cache_result(cache_key: str, result: ProcessingResponse):
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
+    sglang_status = await check_sglang_server(settings.sglang_url)
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "mineru_available": MINERU_AVAILABLE,
-        "redis_available": redis_client is not None
+        "redis_available": redis_client is not None,
+        "sglang_server_available": sglang_status,
+        "sglang_url": settings.sglang_url
     }
 
 @app.get("/status")
 async def get_status():
     """Get service status and capabilities"""
+    sglang_status = await check_sglang_server(settings.sglang_url)
     return {
         "service": "MinerU PDF Processing Service",
         "version": "1.0.0",
         "mineru_version": MINERU_VERSION,
         "mineru_available": MINERU_AVAILABLE,
         "redis_available": redis_client is not None,
+        "sglang_server_available": sglang_status,
+        "sglang_url": settings.sglang_url,
         "max_file_size_mb": settings.max_file_size // (1024 * 1024),
         "cache_ttl_seconds": settings.cache_ttl,
-        "supported_backends": ["pipeline", "vlm-transformers", "vlm-sglang-engine"],
+        "supported_backends": ["pipeline", "vlm-transformers", "vlm-sglang-engine", "vlm-sglang-client"],
         "supported_methods": ["auto", "txt", "ocr"],
-        "supported_formats": ["pdf"]
+        "supported_formats": ["pdf"],
+        "default_backend": settings.mineru_backend
     }
 
 @app.post("/process-pdf", response_model=ProcessingResponse)
@@ -1134,7 +1176,7 @@ async def process_pdf(
     force: str = '0',
     _auth: bool = Depends(verify_api_key)
 ):
-    """Process PDF with MinerU"""
+    """Process PDF with MinerU using SGLang acceleration"""
     
     # Validate file
     if not pdf.filename.lower().endswith('.pdf'):
@@ -1155,10 +1197,14 @@ async def process_pdf(
     try:
         options_dict = json.loads(options) if options else {}
         
+        # 🚀 Set default backend to SGLang client if not specified
+        if 'backend' not in options_dict:
+            options_dict['backend'] = 'vlm-sglang-client'
+        
         # Add detailed debugging
         logger.info(f"[DEBUG] Raw options string: '{options}'")
         logger.info(f"[DEBUG] Parsed options_dict: {options_dict}")
-        logger.info(f"[DEBUG] Options dict keys: {list(options_dict.keys())}")
+        logger.info(f"[DEBUG] Backend selected: {options_dict.get('backend', 'default')}")
         
         processing_options = ProcessingOptions(**options_dict)
         # Check all three sources for force parameter
@@ -1168,7 +1214,9 @@ async def process_pdf(
             query_force
         )
         
-        logger.info(f"[DEBUG] Force sources - form_field: '{force}', json_option: {options_dict.get('force', 'not found')}, query_param: {query_force}, final: {force_reprocess}")
+        logger.info(f"🚀 Processing with backend: {processing_options.backend}")
+        if processing_options.backend == 'vlm-sglang-client':
+            logger.info(f"🚀 SGLang server URL: {processing_options.sglang_url}")
         
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid options: {e}")
@@ -1234,6 +1282,9 @@ async def process_pdf_raw(
     # Parse options
     try:
         options_dict = json.loads(options) if options else {}
+        # Default to SGLang client
+        if 'backend' not in options_dict:
+            options_dict['backend'] = 'vlm-sglang-client'
         processing_options = ProcessingOptions(**options_dict)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid options: {e}")
