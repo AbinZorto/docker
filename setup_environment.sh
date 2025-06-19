@@ -98,6 +98,9 @@ docker-compose logs -f mineru-api
 curl http://localhost:8000/health
 
 
+#!/bin/bash
+# Updated .env file with corrected Slang server URL
+
 cat > .env << EOF
 # MinerU API Configuration
 MINERU_API_KEY=cbe9f548-54fe-4e9c-ada6-15291466d213
@@ -113,8 +116,8 @@ CACHE_TTL=7200
 DEBUG=false
 DOMAIN=mineru.writemine.com
 
-# 🚀 SGLang Client Configuration (NEW)
-SGLANG_URL=http://127.0.0.1:30000
+# 🚀 SGLang Client Configuration (UPDATED)
+SGLANG_URL=http://127.0.0.1:8001
 MINERU_BACKEND=vlm-sglang-client
 
 # T4-Optimized GPU Configuration
@@ -149,7 +152,7 @@ SGLANG_MEM_FRACTION_STATIC=0.85
 SGLANG_CHUNKED_PREFILL_SIZE=4096
 SGLANG_ENABLE_TORCH_COMPILE=true
 
-# Slang server configuration
+# 🌐 Slang Server Configuration (UPDATED)
 SLANG_PORT=8001
 SLANG_HOST=0.0.0.0
 SLANG_LOG_LEVEL=info
