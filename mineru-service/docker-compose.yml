@@ -3,6 +3,7 @@ services:
   mineru-api:
     build: .
     ports:
+      - "8000:8000"
       - "8001:8001" # Add this for Slang server
     environment:
       # Your existing environment variables (preserved)
