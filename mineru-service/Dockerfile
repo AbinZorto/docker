@@ -44,18 +44,8 @@ RUN mkdir -p /app/uploads /app/outputs /app/cache /tmp/mineru_processing
 # Set permissions
 RUN chmod -R 755 /app
 
-# Create SGLang server startup script
-RUN echo '#!/bin/bash\n\
-mineru-sglang-server \\\n\
-    --host 0.0.0.0 \\\n\
-    --port 8001 \\\n\
-    --max-running-requests 128 \\\n\
-    --max-total-tokens 3000000 \\\n\
-    --max-prefill-tokens 32768 \\\n\
-    --mem-fraction-static 0.85 \\\n\
-    --chunked-prefill-size 4096 \\\n\
-    --enable-torch-compile > /tmp/mineru_server.log 2>&1 &' > /usr/local/bin/start-sglang && \
-    chmod +x /usr/local/bin/start-sglang
+# Start SGLang server in background
+RUN mineru-sglang-server --host 0.0.0.0 --port 8001 --max-running-requests 128 --max-total-tokens 3000000 --max-prefill-tokens 32768 --mem-fraction-static 0.85 --chunked-prefill-size 4096 --enable-torch-compile > /tmp/mineru_server.log 2>&1 &
 
 # Expose ports
 EXPOSE 8000 8001
