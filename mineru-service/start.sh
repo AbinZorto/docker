@@ -205,7 +205,7 @@ mineru-sglang-server \
 SGLANG_PID=$!
 echo "📝 SGLang server PID: $SGLANG_PID"
 
-# Wait for SGLang server to be ready
+#Wait for SGLang server to be ready
 echo "⏳ Waiting for SGLang server to start..."
 timeout=1200
 counter=0
