@@ -54,7 +54,7 @@ class Settings(BaseModel):
     # 🚀 NEW: SGLang client settings
     mineru_device: str = os.getenv("MINERU_DEVICE", "cuda")  # Default to cuda for SGLang
     mineru_backend: str = os.getenv("MINERU_BACKEND", "vlm-sglang-client")  # Default to SGLang client
-    sglang_url: str = os.getenv("SGLANG_URL", "http://127.0.0.1:30000")  # SGLang server URL
+    sglang_url: str = os.getenv("SGLANG_URL", "http://127.0.0.1:8001")  # SGLang server URL
     model_cache_dir: str = os.getenv("MODEL_CACHE_DIR", "/app/models")
 
 settings = Settings()
