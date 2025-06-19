@@ -189,6 +189,47 @@ for i in range(max_attempts):
 "
 fi
 
+# Start SGLang server in background
+echo "🔥 Starting SGLang server..."
+mineru-sglang-server \
+    --host 0.0.0.0 \
+    --port 8001 \
+    --max-running-requests 128 \
+    --max-total-tokens 3000000 \
+    --max-prefill-tokens 32768 \
+    --mem-fraction-static 0.85 \
+    --chunked-prefill-size 4096 \
+    --enable-torch-compile \
+    > /app/logs/sglang_server.log 2>&1 &
+
+SGLANG_PID=$!
+echo "📝 SGLang server PID: $SGLANG_PID"
+
+# Wait for SGLang server to be ready
+echo "⏳ Waiting for SGLang server to start..."
+timeout=1200
+counter=0
+while ! curl -s http://localhost:8001/health > /dev/null 2>&1; do
+    # Check if SGLang process is still running
+    if ! kill -0 $SGLANG_PID 2>/dev/null; then
+        echo "❌ SGLang server process died. Check logs:"
+        tail -50 /app/logs/sglang_server.log
+        exit 1
+    fi
+    
+    sleep 5
+    counter=$((counter + 5))
+    if [ $counter -ge $timeout ]; then
+        echo "❌ SGLang server failed to start within $timeout seconds"
+        echo "📋 Server logs (last 50 lines):"
+        tail -50 /app/logs/sglang_server.log
+        exit 1
+    fi
+    echo "⏳ Still waiting for SGLang... ($counter/$timeout seconds)"
+done
+
+echo "✅ SGLang server is ready!"
+
 # Set environment variables
 export PYTHONPATH="/app:$PYTHONPATH"
 export TESSDATA_PREFIX="/usr/share/tesseract-ocr/5/tessdata/"
