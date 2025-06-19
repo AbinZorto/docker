@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Start script for MinerU service
+# Start script for MinerU service with Slang server
 
 # Set up logging
 mkdir -p /app/logs
@@ -176,10 +176,121 @@ fi
 export PYTHONPATH="/app:$PYTHONPATH"
 export TESSDATA_PREFIX="/usr/share/tesseract-ocr/5/tessdata/"
 
-# Start the application
+# Start Slang server in background
+echo "🌐 Starting Slang server..."
+start_slang_server() {
+    # Default Slang server configuration
+    SLANG_PORT=${SLANG_PORT:-8001}
+    SLANG_HOST=${SLANG_HOST:-0.0.0.0}
+    SLANG_LOG_LEVEL=${SLANG_LOG_LEVEL:-info}
+    
+    echo "📡 Slang server configuration:"
+    echo "   Host: $SLANG_HOST"
+    echo "   Port: $SLANG_PORT"
+    echo "   Log Level: $SLANG_LOG_LEVEL"
+    
+    # Check if Slang server is available
+    if command -v slang-server >/dev/null 2>&1; then
+        echo "✅ slang-server command found"
+        
+        # Start Slang server in background with logging
+        echo "🚀 Starting Slang server on $SLANG_HOST:$SLANG_PORT..."
+        nohup slang-server \
+            --host $SLANG_HOST \
+            --port $SLANG_PORT \
+            --log-level $SLANG_LOG_LEVEL \
+            > /app/logs/slang-server.log 2>&1 &
+        
+        SLANG_PID=$!
+        echo "📊 Slang server started with PID: $SLANG_PID"
+        
+        # Wait a moment and check if it's running
+        sleep 3
+        if kill -0 $SLANG_PID 2>/dev/null; then
+            echo "✅ Slang server is running"
+            
+            # Test connection to Slang server
+            echo "🧪 Testing Slang server connection..."
+            for i in {1..10}; do
+                if curl -s "http://localhost:$SLANG_PORT/health" >/dev/null 2>&1; then
+                    echo "✅ Slang server health check passed"
+                    break
+                elif [ $i -eq 10 ]; then
+                    echo "⚠️ Slang server health check failed after 10 attempts"
+                else
+                    echo "⏳ Waiting for Slang server to be ready... ($i/10)"
+                    sleep 2
+                fi
+            done
+        else
+            echo "❌ Slang server failed to start"
+            echo "📋 Slang server logs:"
+            tail -20 /app/logs/slang-server.log
+        fi
+        
+    elif python3 -c "import slang" 2>/dev/null; then
+        echo "✅ Slang Python module found, trying to start server..."
+        
+        # Try to start Slang server via Python
+        nohup python3 -m slang.server \
+            --host $SLANG_HOST \
+            --port $SLANG_PORT \
+            --log-level $SLANG_LOG_LEVEL \
+            > /app/logs/slang-server.log 2>&1 &
+        
+        SLANG_PID=$!
+        echo "📊 Slang server (Python) started with PID: $SLANG_PID"
+        
+        # Wait and check
+        sleep 3
+        if kill -0 $SLANG_PID 2>/dev/null; then
+            echo "✅ Slang server (Python) is running"
+        else
+            echo "❌ Slang server (Python) failed to start"
+            echo "📋 Slang server logs:"
+            tail -20 /app/logs/slang-server.log
+        fi
+        
+    else
+        echo "⚠️ Slang server not found. Available options:"
+        echo "   - Install with: pip install slang-server"
+        echo "   - Or ensure slang-server binary is in PATH"
+        echo "   - Continuing without Slang server..."
+    fi
+}
+
+# Start Slang server
+start_slang_server
+
+# Create cleanup function for graceful shutdown
+cleanup() {
+    echo "🛑 Shutting down services..."
+    
+    # Kill Slang server if running
+    if [ ! -z "$SLANG_PID" ] && kill -0 $SLANG_PID 2>/dev/null; then
+        echo "🔴 Stopping Slang server (PID: $SLANG_PID)..."
+        kill $SLANG_PID
+        sleep 2
+        if kill -0 $SLANG_PID 2>/dev/null; then
+            echo "🔴 Force killing Slang server..."
+            kill -9 $SLANG_PID
+        fi
+    fi
+    
+    echo "👋 Cleanup complete"
+    exit 0
+}
+
+# Set up signal handlers for graceful shutdown
+trap cleanup SIGTERM SIGINT
+
+# Start the FastAPI application
 echo "🚀 Starting FastAPI application..."
-echo "🌐 Service will be available at http://0.0.0.0:8000"
+echo "🌐 MinerU API will be available at http://0.0.0.0:8000"
 echo "📖 API docs at http://0.0.0.0:8000/docs"
+if [ ! -z "$SLANG_PORT" ]; then
+    echo "📡 Slang server available at http://0.0.0.0:$SLANG_PORT"
+fi
 
 # Use uvicorn with proper settings for production
 exec uvicorn app:app \
@@ -190,4 +301,3 @@ exec uvicorn app:app \
     --access-log \
     --loop asyncio \
     --http h11
-
