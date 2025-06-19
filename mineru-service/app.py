@@ -348,6 +348,9 @@ class MinerUProcessor:
             # Prioritize middle.json files which contain the structured data with bounding boxes
             middle_json_files = list(output_dir.rglob("*_middle.json"))
             model_json_files = list(output_dir.rglob("*_model.json"))
+            if not model_json_files:
+                # Fallback for model output with .txt extension, as seen in some versions
+                model_json_files = list(output_dir.rglob("*_model_output.txt"))
             content_list_files = list(output_dir.rglob("*_content_list.json"))
             
             logger.info(f"Found {len(json_files)} JSON files, {len(middle_json_files)} middle files, {len(model_json_files)} model files, {len(content_list_files)} content_list files, and {len(md_files)} MD files")
@@ -455,125 +458,132 @@ class MinerUProcessor:
         """Convert MinerU middle JSON output to our element format"""
         elements = []
         
+        pdf_info = []
         if isinstance(data, dict) and "pdf_info" in data:
             pdf_info = data["pdf_info"]
-            
-            for page_idx, page_data in enumerate(pdf_info):
-                if isinstance(page_data, dict) and "preproc_blocks" in page_data:
-                    preproc_blocks = page_data["preproc_blocks"]
+        elif isinstance(data, list):
+            pdf_info = data  # Handle cases where middle.json is a list of pages
+        
+        if not pdf_info:
+            logger.warning("Could not find processable content in middle JSON. It's neither a dict with 'pdf_info' nor a list of pages.")
+            return elements
+
+        for page_idx, page_data in enumerate(pdf_info):
+            if isinstance(page_data, dict) and "preproc_blocks" in page_data:
+                preproc_blocks = page_data["preproc_blocks"]
+                
+                for block in preproc_blocks:
+                    if not isinstance(block, dict):
+                        continue
+                        
+                    element_type = block.get("type", "text")
+                    bbox_array = block.get("bbox", [0, 0, 0, 0])
+                    block_index = block.get("index", 0)
                     
-                    for block in preproc_blocks:
-                        if not isinstance(block, dict):
-                            continue
-                            
-                        element_type = block.get("type", "text")
-                        bbox_array = block.get("bbox", [0, 0, 0, 0])
-                        block_index = block.get("index", 0)
+                    # Convert bbox from [x1, y1, x2, y2] to our format
+                    if len(bbox_array) >= 4:
+                        x1, y1, x2, y2 = bbox_array[:4]
+                        # Convert to normalized coordinates (assuming page dimensions)
+                        # For now, we'll use absolute coordinates and normalize later
+                        bbox = BoundingBox(
+                            x=float(x1), 
+                            y=float(y1), 
+                            width=float(x2 - x1), 
+                            height=float(y2 - y1)
+                        )
+                    else:
+                        bbox = BoundingBox(x=0.0, y=0.0, width=0.0, height=0.0)
+                    
+                    # Extract text content from lines and spans
+                    text_content = ""
+                    if "lines" in block:
+                        for line in block["lines"]:
+                            if isinstance(line, dict) and "spans" in line:
+                                for span in line["spans"]:
+                                    if isinstance(span, dict) and "content" in span:
+                                        text_content += span["content"] + " "
+                    
+                    # Handle image blocks specially
+                    if element_type == "image":
+                        # Look for image_body and image_caption in blocks
+                        image_content = ""
+                        image_caption = ""
                         
-                        # Convert bbox from [x1, y1, x2, y2] to our format
-                        if len(bbox_array) >= 4:
-                            x1, y1, x2, y2 = bbox_array[:4]
-                            # Convert to normalized coordinates (assuming page dimensions)
-                            # For now, we'll use absolute coordinates and normalize later
-                            bbox = BoundingBox(
-                                x=float(x1), 
-                                y=float(y1), 
-                                width=float(x2 - x1), 
-                                height=float(y2 - y1)
-                            )
-                        else:
-                            bbox = BoundingBox(x=0.0, y=0.0, width=0.0, height=0.0)
-                        
-                        # Extract text content from lines and spans
-                        text_content = ""
-                        if "lines" in block:
-                            for line in block["lines"]:
-                                if isinstance(line, dict) and "spans" in line:
-                                    for span in line["spans"]:
-                                        if isinstance(span, dict) and "content" in span:
-                                            text_content += span["content"] + " "
-                        
-                        # Handle image blocks specially
-                        if element_type == "image":
-                            # Look for image_body and image_caption in blocks
-                            image_content = ""
-                            image_caption = ""
-                            
-                            if "blocks" in block:
-                                for sub_block in block["blocks"]:
-                                    if sub_block.get("type") == "image_body":
-                                        # Extract image path
-                                        for line in sub_block.get("lines", []):
-                                            for span in line.get("spans", []):
-                                                if span.get("type") == "image" and "image_path" in span:
-                                                    image_content = span["image_path"]
-                                    
-                                    elif sub_block.get("type") == "image_caption":
-                                        # Extract caption text
-                                        for line in sub_block.get("lines", []):
-                                            for span in line.get("spans", []):
-                                                if "content" in span:
-                                                    image_caption += span["content"] + " "
-                            
-                            # Create separate elements for image and caption
-                            if image_content:
-                                image_element = MinerUElement(
-                                    type="image",
-                                    content=image_content,
-                                    bbox=bbox,
-                                    pageNumber=page_idx + 1,
-                                    hierarchy=None,
-                                    confidence=0.95,
-                                    metadata=None
-                                )
-                                image_element.__dict__["_mineru_metadata"] = {
-                                    "source": "mineru_middle_json",
-                                    "original_type": "image_body",
-                                    "block_index": block_index
-                                }
-                                elements.append(image_element)
-                            
-                            if image_caption.strip():
-                                caption_element = MinerUElement(
-                                    type="caption",
-                                    content=image_caption.strip(),
-                                    bbox=bbox,  # Same bbox for now, could be refined
-                                    pageNumber=page_idx + 1,
-                                    hierarchy=None,
-                                    confidence=0.95,
-                                    metadata=ElementMetadata(figureCaption=image_caption.strip())
-                                )
-                                caption_element.__dict__["_mineru_metadata"] = {
-                                    "source": "mineru_middle_json",
-                                    "original_type": "image_caption",
-                                    "block_index": block_index
-                                }
-                                elements.append(caption_element)
-                        
-                        else:
-                            # Handle text, title, and other elements
-                            text_content = text_content.strip()
-                            if text_content:
-                                # Determine if this is likely a heading based on type and content
-                                if element_type == "title" or self._looks_like_heading(text_content):
-                                    element_type = "heading"
+                        if "blocks" in block:
+                            for sub_block in block["blocks"]:
+                                if sub_block.get("type") == "image_body":
+                                    # Extract image path
+                                    for line in sub_block.get("lines", []):
+                                        for span in line.get("spans", []):
+                                            if span.get("type") == "image" and "image_path" in span:
+                                                image_content = span["image_path"]
                                 
-                                element = MinerUElement(
-                                    type=element_type,
-                                    content=text_content,
-                                    bbox=bbox,
-                                    pageNumber=page_idx + 1,
-                                    hierarchy=None,  # Will be determined later based on content
-                                    confidence=0.95,
-                                    metadata=None  # We'll store metadata separately for now
-                                )
-                                # Store metadata as a custom attribute for our processing
-                                element.__dict__["_mineru_metadata"] = {
-                                    "source": "mineru_middle_json",
-                                    "original_type": block.get("type", "unknown"),
-                                    "block_index": block_index
-                                }
-                                elements.append(element)
+                                elif sub_block.get("type") == "image_caption":
+                                    # Extract caption text
+                                    for line in sub_block.get("lines", []):
+                                        for span in line.get("spans", []):
+                                            if "content" in span:
+                                                image_caption += span["content"] + " "
+                        
+                        # Create separate elements for image and caption
+                        if image_content:
+                            image_element = MinerUElement(
+                                type="image",
+                                content=image_content,
+                                bbox=bbox,
+                                pageNumber=page_idx + 1,
+                                hierarchy=None,
+                                confidence=0.95,
+                                metadata=None
+                            )
+                            image_element.__dict__["_mineru_metadata"] = {
+                                "source": "mineru_middle_json",
+                                "original_type": "image_body",
+                                "block_index": block_index
+                            }
+                            elements.append(image_element)
+                        
+                        if image_caption.strip():
+                            caption_element = MinerUElement(
+                                type="caption",
+                                content=image_caption.strip(),
+                                bbox=bbox,  # Same bbox for now, could be refined
+                                pageNumber=page_idx + 1,
+                                hierarchy=None,
+                                confidence=0.95,
+                                metadata=ElementMetadata(figureCaption=image_caption.strip())
+                            )
+                            caption_element.__dict__["_mineru_metadata"] = {
+                                "source": "mineru_middle_json",
+                                "original_type": "image_caption",
+                                "block_index": block_index
+                            }
+                            elements.append(caption_element)
+                    
+                    else:
+                        # Handle text, title, and other elements
+                        text_content = text_content.strip()
+                        if text_content:
+                            # Determine if this is likely a heading based on type and content
+                            if element_type == "title" or self._looks_like_heading(text_content):
+                                element_type = "heading"
+                            
+                            element = MinerUElement(
+                                type=element_type,
+                                content=text_content,
+                                bbox=bbox,
+                                pageNumber=page_idx + 1,
+                                hierarchy=None,  # Will be determined later based on content
+                                confidence=0.95,
+                                metadata=None  # We'll store metadata separately for now
+                            )
+                            # Store metadata as a custom attribute for our processing
+                            element.__dict__["_mineru_metadata"] = {
+                                "source": "mineru_middle_json",
+                                "original_type": block.get("type", "unknown"),
+                                "block_index": block_index
+                            }
+                            elements.append(element)
         
         # Sort elements by page and block index for proper order
         elements.sort(key=lambda x: (x.pageNumber, getattr(x, '_mineru_metadata', {}).get("block_index", 0)))
@@ -614,7 +624,7 @@ class MinerUProcessor:
             5: "table",           # Table
             6: "caption",         # Table caption
             7: "caption",         # Table footnote
-            8: "equation",        # Block formula
+            8: "equation",        # Block formula (isolate_formula)
             9: "caption",         # Formula caption
             13: "equation",       # Inline formula (embedding)
             14: "equation",       # Block formula (isolated)
