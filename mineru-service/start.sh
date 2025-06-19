@@ -207,7 +207,7 @@ echo "📝 SGLang server PID: $SGLANG_PID"
 
 # Wait for SGLang server to be ready
 echo "⏳ Waiting for SGLang server to start..."
-timeout=180
+timeout=300
 counter=0
 while ! curl -s http://localhost:8001/health > /dev/null 2>&1; do
     # Check if SGLang process is still running
