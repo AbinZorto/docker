@@ -469,11 +469,8 @@ class MinerUProcessor:
                         bbox_array = block.get("bbox", [0, 0, 0, 0])
                         block_index = block.get("index", 0)
                         
-                        # Convert bbox from [x1, y1, x2, y2] to our format
                         if len(bbox_array) >= 4:
                             x1, y1, x2, y2 = bbox_array[:4]
-                            # Convert to normalized coordinates (assuming page dimensions)
-                            # For now, we'll use absolute coordinates and normalize later
                             bbox = BoundingBox(
                                 x=float(x1), 
                                 y=float(y1), 
@@ -483,7 +480,6 @@ class MinerUProcessor:
                         else:
                             bbox = BoundingBox(x=0.0, y=0.0, width=0.0, height=0.0)
                         
-                        # Extract text content from lines and spans
                         text_content = ""
                         if "lines" in block:
                             for line in block["lines"]:
@@ -492,29 +488,24 @@ class MinerUProcessor:
                                         if isinstance(span, dict) and "content" in span:
                                             text_content += span["content"] + " "
                         
-                        # Handle image blocks specially
                         if element_type == "image":
-                            # Look for image_body and image_caption in blocks
                             image_content = ""
                             image_caption = ""
                             
                             if "blocks" in block:
                                 for sub_block in block["blocks"]:
                                     if sub_block.get("type") == "image_body":
-                                        # Extract image path
                                         for line in sub_block.get("lines", []):
                                             for span in line.get("spans", []):
                                                 if span.get("type") == "image" and "image_path" in span:
                                                     image_content = span["image_path"]
                                     
                                     elif sub_block.get("type") == "image_caption":
-                                        # Extract caption text
                                         for line in sub_block.get("lines", []):
                                             for span in line.get("spans", []):
                                                 if "content" in span:
                                                     image_caption += span["content"] + " "
                             
-                            # Create separate elements for image and caption
                             if image_content:
                                 image_element = MinerUElement(
                                     type="image",
@@ -536,7 +527,7 @@ class MinerUProcessor:
                                 caption_element = MinerUElement(
                                     type="caption",
                                     content=image_caption.strip(),
-                                    bbox=bbox,  # Same bbox for now, could be refined
+                                    bbox=bbox,
                                     pageNumber=page_idx + 1,
                                     hierarchy=None,
                                     confidence=0.95,
@@ -550,10 +541,8 @@ class MinerUProcessor:
                                 elements.append(caption_element)
                         
                         else:
-                            # Handle text, title, and other elements
                             text_content = text_content.strip()
                             if text_content:
-                                # Determine if this is likely a heading based on type and content
                                 if element_type == "title" or self._looks_like_heading(text_content):
                                     element_type = "heading"
                                 
@@ -562,11 +551,10 @@ class MinerUProcessor:
                                     content=text_content,
                                     bbox=bbox,
                                     pageNumber=page_idx + 1,
-                                    hierarchy=None,  # Will be determined later based on content
+                                    hierarchy=None,
                                     confidence=0.95,
-                                    metadata=None  # We'll store metadata separately for now
+                                    metadata=None
                                 )
-                                # Store metadata as a custom attribute for our processing
                                 element.__dict__["_mineru_metadata"] = {
                                     "source": "mineru_middle_json",
                                     "original_type": block.get("type", "unknown"),
@@ -574,7 +562,6 @@ class MinerUProcessor:
                                 }
                                 elements.append(element)
         
-        # Sort elements by page and block index for proper order
         elements.sort(key=lambda x: (x.pageNumber, getattr(x, '_mineru_metadata', {}).get("block_index", 0)))
         
         logger.info(f"Converted {len(elements)} elements from MinerU middle JSON")
@@ -587,7 +574,6 @@ class MinerUProcessor:
             logger.warning("Model data is not in expected format")
             return elements
             
-        # Get layout detections from all pages
         all_layout_dets = []
         for page_data in model_data:
             if isinstance(page_data, dict):
@@ -595,7 +581,6 @@ class MinerUProcessor:
                 page_info = page_data.get("page_info", {})
                 page_no = page_info.get("page_no", 0)
                 
-                # Add page number to each detection
                 for det in layout_dets:
                     det_with_page = dict(det)
                     det_with_page["page_no"] = page_no
@@ -603,58 +588,31 @@ class MinerUProcessor:
                     
         logger.info(f"Processing {len(all_layout_dets)} layout detections from model across all pages")
         
-        # Official MinerU category mapping from documentation
         category_mapping = {
-            0: "title",           # Title
-            1: "text",            # Plain text
-            2: "abandon",         # Headers, footers, page numbers, page annotations
-            3: "image",           # Figure/Image
-            4: "caption",         # Figure caption
-            5: "table",           # Table
-            6: "caption",         # Table caption
-            7: "caption",         # Table footnote
-            8: "equation",        # Block formula
-            9: "caption",         # Formula caption
-            13: "equation",       # Inline formula (embedding)
-            14: "equation",       # Block formula (isolated)
-            15: "text"            # OCR recognition result
+            0: "title", 1: "text", 2: "abandon", 3: "image", 4: "caption",
+            5: "table", 6: "caption", 7: "caption", 8: "equation", 9: "caption",
+            13: "equation", 14: "equation", 15: "text"
         }
         
         enhanced_elements = []
         
-        # First, add model-detected elements that might not be in middle.json
         for detection in all_layout_dets:
-            if detection.get("score", 0) < 0.7:  # Skip low-confidence detections
-                continue
-                
+            if detection.get("score", 0) < 0.7: continue
             category_id = detection.get("category_id")
             poly = detection.get("poly", [])
             page_no = detection.get("page_no", 0)
             
-            # Skip "abandon" category (headers, footers, page numbers)
-            if category_id == 2:
-                continue
+            if category_id == 2: continue
             
             if len(poly) >= 8:
-                # Convert polygon to bounding box
-                # poly format: [x0, y0, x1, y1, x2, y2, x3, y3] (top-left, top-right, bottom-right, bottom-left)
                 x_coords = [poly[i] for i in range(0, len(poly), 2)]
                 y_coords = [poly[i] for i in range(1, len(poly), 2)]
-                
                 x1, x2 = min(x_coords), max(x_coords)
                 y1, y2 = min(y_coords), max(y_coords)
-                
-                bbox = BoundingBox(
-                    x=float(x1),
-                    y=float(y1), 
-                    width=float(x2 - x1),
-                    height=float(y2 - y1)
-                )
-                
+                bbox = BoundingBox(x=float(x1), y=float(y1), width=float(x2-x1), height=float(y2-y1))
                 element_type = category_mapping.get(category_id, "text")
                 confidence = detection.get("score", 0.9)
                 
-                # Check if this detection overlaps significantly with existing elements
                 overlaps_existing = False
                 for existing_element in elements:
                     if (existing_element.pageNumber == page_no + 1 and 
@@ -662,97 +620,63 @@ class MinerUProcessor:
                         overlaps_existing = True
                         break
                 
-                # Add special elements that might be missed (tables, equations, figures)
                 if not overlaps_existing and element_type in ["image", "table", "equation"]:
                     content = detection.get("latex", detection.get("html", f"{element_type.title()} detected by model"))
-                    
                     model_element = MinerUElement(
-                        type=element_type,
-                        content=content,
-                        bbox=bbox,
-                        pageNumber=page_no + 1,  # Convert 0-based to 1-based
-                        hierarchy=None,
-                        confidence=confidence,
-                        metadata=None
+                        type=element_type, content=content, bbox=bbox,
+                        pageNumber=page_no + 1, hierarchy=None, confidence=confidence, metadata=None
                     )
                     model_element.__dict__["_mineru_metadata"] = {
-                        "source": "mineru_model_json",
-                        "category_id": category_id,
-                        "model_score": confidence,
-                        "detection_method": "cv_model",
-                        "has_latex": bool(detection.get("latex")),
-                        "has_html": bool(detection.get("html"))
+                        "source": "mineru_model_json", "category_id": category_id,
+                        "model_score": confidence, "detection_method": "cv_model",
+                        "has_latex": bool(detection.get("latex")), "has_html": bool(detection.get("html"))
                     }
                     enhanced_elements.append(model_element)
         
-        # Enhance existing elements with model data for better bounding boxes
         for element in elements:
             enhanced_element = element
             best_match = None
             best_overlap = 0
             
-            # Find the best matching model detection on the same page
             for detection in all_layout_dets:
-                if detection.get("score", 0) < 0.5:
-                    continue
-                
+                if detection.get("score", 0) < 0.5: continue
                 page_no = detection.get("page_no", 0)
-                if page_no + 1 != element.pageNumber:  # Must be on same page
-                    continue
+                if page_no + 1 != element.pageNumber: continue
                     
                 poly = detection.get("poly", [])
                 if len(poly) >= 8:
                     x_coords = [poly[i] for i in range(0, len(poly), 2)]
                     y_coords = [poly[i] for i in range(1, len(poly), 2)]
-                    
                     x1, x2 = min(x_coords), max(x_coords)
                     y1, y2 = min(y_coords), max(y_coords)
-                    
-                    model_bbox = BoundingBox(
-                        x=float(x1), y=float(y1),
-                        width=float(x2 - x1), height=float(y2 - y1)
-                    )
+                    model_bbox = BoundingBox(x=float(x1), y=float(y1), width=float(x2-x1), height=float(y2-y1))
                     
                     overlap = self._bbox_overlap_ratio(element.bbox, model_bbox)
                     if overlap > best_overlap and overlap > 0.3:
                         best_overlap = overlap
                         best_match = {
-                            "bbox": model_bbox,
-                            "score": detection.get("score", 0),
+                            "bbox": model_bbox, "score": detection.get("score", 0),
                             "category_id": detection.get("category_id"),
-                            "latex": detection.get("latex"),
-                            "html": detection.get("html")
+                            "latex": detection.get("latex"), "html": detection.get("html")
                         }
             
-            # Enhance element with model data if good match found
             if best_match and best_overlap > 0.5:
-                # Use LaTeX or HTML content if available for equations
                 enhanced_content = element.content
                 enhanced_metadata = ElementMetadata()
                 
                 if best_match.get("latex") and element.type in ["equation", "formula"]:
                     enhanced_content = best_match["latex"]
-                elif best_match.get("html") and element.type in ["table"]:
-                    enhanced_metadata = ElementMetadata()  # Could add HTML to metadata later
                 
                 enhanced_element = MinerUElement(
-                    type=element.type,
-                    content=enhanced_content,
-                    bbox=best_match["bbox"],  # Use more precise model bbox
-                    pageNumber=element.pageNumber,
-                    hierarchy=element.hierarchy,
-                    confidence=max(element.confidence, best_match["score"]),
-                    metadata=enhanced_metadata
+                    type=element.type, content=enhanced_content, bbox=best_match["bbox"],
+                    pageNumber=element.pageNumber, hierarchy=element.hierarchy,
+                    confidence=max(element.confidence, best_match["score"]), metadata=enhanced_metadata
                 )
                 
-                # Copy original metadata and add enhancements
                 original_meta = getattr(element, '_mineru_metadata', {})
                 enhanced_element.__dict__["_mineru_metadata"] = {
-                    **original_meta,
-                    "model_enhanced": True,
-                    "model_score": best_match["score"],
-                    "bbox_overlap": best_overlap,
-                    "model_category_id": best_match["category_id"]
+                    **original_meta, "model_enhanced": True, "model_score": best_match["score"],
+                    "bbox_overlap": best_overlap, "model_category_id": best_match["category_id"]
                 }
                 if best_match.get("html"):
                     enhanced_element.__dict__["_mineru_metadata"]["html_content"] = best_match["html"]
@@ -807,71 +731,55 @@ class MinerUProcessor:
         extracted_title = None
         extracted_abstract = None
         
-        # First pass: look for title and abstract patterns
         for i, element in enumerate(elements):
             content_lower = element.content.lower().strip()
+            mineru_meta = getattr(element, '_mineru_metadata', {})
             
-            # Look for title (prioritize elements marked as "title" type)
             if not extracted_title and element.type in ["title", "heading"]:
-                mineru_meta = getattr(element, '_mineru_metadata', {})
-                # For middle.json elements, trust the "title" type more
                 if (mineru_meta.get("source") == "mineru_middle_json" and
                     mineru_meta.get("original_type") == "title"):
                     extracted_title = element.content.strip()
-                # For model.json elements, trust category_id 0 (title)
                 elif (mineru_meta.get("source") == "mineru_model_json" and
                       mineru_meta.get("category_id") == 0):
                     extracted_title = element.content.strip()
                 elif element.type == "heading" and len(element.content.strip()) < 200:
                     extracted_title = element.content.strip()
             
-            # Fallback title detection for other sources
             elif not extracted_title and element.type in ["text"]:
-                # Skip very short content, page numbers, headers/footers
                 if (len(element.content.strip()) > 10 and 
                     not content_lower.isdigit() and 
                     not content_lower.startswith(('page ', 'doi:', 'arxiv:')) and
-                    element.pageNumber <= 2):  # Title usually on first couple pages
-                    
-                    # Higher priority for elements with title-like characteristics
+                    element.pageNumber <= 2):
                     if (any(keyword in content_lower for keyword in ['title', 'abstract']) or
-                        (i < 5 and len(element.content.strip()) < 200)):  # Early elements, reasonable length
+                        (i < 5 and len(element.content.strip()) < 200)):
                         extracted_title = element.content.strip()
             
-            # Look for abstract
             if not extracted_abstract and element.type == "text":
                 if (content_lower.startswith('abstract') or 
                     'abstract' in content_lower[:50] or
                     (extracted_title and i > 0 and i < 10 and len(element.content.strip()) > 100)):
-                    
-                    # Clean up abstract text
                     abstract_text = element.content.strip()
                     if abstract_text.lower().startswith('abstract'):
-                        # Remove "abstract" prefix and clean up
                         abstract_text = abstract_text[8:].strip()
                         if abstract_text.startswith(':') or abstract_text.startswith('-'):
                             abstract_text = abstract_text[1:].strip()
                     
-                    if len(abstract_text) > 50:  # Reasonable abstract length
+                    if len(abstract_text) > 50:
                         extracted_abstract = abstract_text
         
-        # Second pass: build sections from headings
         for element in elements:
             if element.type in ["heading", "title"] or self._looks_like_heading(element.content):
-                # Start new section
                 if current_section:
                     sections.append(current_section)
                 
-                # Determine heading level
                 level = 1
                 if element.hierarchy and element.hierarchy.level:
                     level = element.hierarchy.level
                 else:
-                    # Try to infer level from content patterns
                     content = element.content.strip()
-                    if content.count('.') >= 2:  # Like "1.2.3 Subsection"
+                    if content.count('.') >= 2:
                         level = content.count('.') + 1
-                    elif content[0:1].isdigit():  # Like "1. Section"
+                    elif content[0:1].isdigit():
                         level = 2
                 
                 current_section = Section(
@@ -884,7 +792,6 @@ class MinerUProcessor:
                 current_section.elements.append(element)
                 current_section.content += element.content + "\n"
         
-        # Add final section
         if current_section:
             sections.append(current_section)
             
