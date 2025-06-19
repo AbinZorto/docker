@@ -3,7 +3,7 @@ services:
   mineru-api:
     build: .
     ports:
-      - "8001:8001"  # Add this for Slang server
+      - "8001:8001" # Add this for Slang server
     environment:
       # Your existing environment variables (preserved)
       - MINERU_API_KEY=${MINERU_API_KEY:-cbe9f548-54fe-4e9c-ada6-15291466d213}
@@ -14,10 +14,10 @@ services:
       - DOMAIN=${DOMAIN:-mineru.writemine.com}
       - SLANG_PORT=8001
       - SLANG_HOST=0.0.0.0
-      
+
       # NEW: GPU-specific environment variables
       - MINERU_DEVICE=cuda
-      - MINERU_BACKEND=vlm-transformers
+      - MINERU_BACKEND=vlm-sglang-client
       - NVIDIA_VISIBLE_DEVICES=all
       - MODEL_CACHE_DIR=/app/models
     volumes:
@@ -25,13 +25,13 @@ services:
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
       - ./cache:/app/cache
-      
+
       # NEW: Model storage volume for GPU models
       - mineru_models:/app/models
     depends_on:
       - redis
     restart: unless-stopped
-    
+
     # Your existing healthcheck (preserved)
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -39,7 +39,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
-    
+
     # NEW: GPU configuration
     deploy:
       resources:
@@ -50,18 +50,18 @@ services:
               capabilities: [gpu]
 
   redis:
-    image: redis:7.2-alpine  # Your version preserved
+    image: redis:7.2-alpine # Your version preserved
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
     restart: unless-stopped
-    
+
     # Redis uses system RAM (not VRAM), so we can be more generous
     # T4 has 16GB VRAM (separate) + 16GB system RAM
     # Allocating 4GB for Redis cache leaves 12GB system RAM for MinerU app/files
     command: redis-server --appendonly yes --maxmemory 4gb --maxmemory-policy allkeys-lru
 
 volumes:
-  redis_data:      # Your existing volume
-  mineru_models:   # NEW: For GPU model storage
+  redis_data: # Your existing volume
+  mineru_models: # NEW: For GPU model storage
