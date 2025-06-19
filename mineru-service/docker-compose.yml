@@ -3,7 +3,7 @@ services:
   mineru-api:
     build: .
     ports:
-      - "8000:8000"
+      - "8001:8001"  # Add this for Slang server
     environment:
       # Your existing environment variables (preserved)
       - MINERU_API_KEY=${MINERU_API_KEY:-cbe9f548-54fe-4e9c-ada6-15291466d213}
@@ -12,6 +12,8 @@ services:
       - CACHE_TTL=7200
       - DEBUG=false
       - DOMAIN=${DOMAIN:-mineru.writemine.com}
+      - SLANG_PORT=8001
+      - SLANG_HOST=0.0.0.0
       
       # NEW: GPU-specific environment variables
       - MINERU_DEVICE=cuda
