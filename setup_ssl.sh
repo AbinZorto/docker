@@ -1,5 +1,5 @@
 #!/bin/bash
-# Fixed SSL Setup Script for MinerU with Directory Creation
+#Fixed SSL Setup Script for MinerU with Directory Creation
 
 set -e  # Exit on error
 
