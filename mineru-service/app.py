@@ -713,12 +713,20 @@ class MinerUProcessor:
             if block_info['lines_deleted'] and block_info['block_idx'] in content_mapping:
                 confidence = 0.75  # Lower confidence for reconstructed elements
 
+            # Create hierarchy if level is available
+            hierarchy = None
+            if block_info.get('level') is not None:
+                hierarchy = Hierarchy(
+                    level=block_info['level'],
+                    section=f"Section {block_info['level']}"  # Provide a default section name
+                )
+            
             processed_elements.append(MinerUElement(
                 type=block_type,
                 content=block_info['content'],
                 bbox=self._convert_bbox_array(block_info['bbox']),
                 pageNumber=block_info['page_idx'] + 1,
-                hierarchy=None if not block_info.get('level') else {"level": block_info['level']},
+                hierarchy=hierarchy,
                 confidence=confidence,
                 metadata=None
             ))
