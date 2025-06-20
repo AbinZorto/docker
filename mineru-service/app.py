@@ -473,170 +473,196 @@ class MinerUProcessor:
         if isinstance(data, dict) and "pdf_info" in data:
             pdf_info = data["pdf_info"]
         elif isinstance(data, list):
-            pdf_info = data  # Handle cases where middle.json is a list of pages
-        
-        if not pdf_info:
-            logger.warning("Could not find processable content in middle JSON. It's neither a dict with 'pdf_info' nor a list of pages.")
+            pdf_info = data
+        else:
+            logger.warning(f"Unexpected data structure for middle JSON: {type(data)}")
             return elements
 
-        logger.debug(f"Processing {len(pdf_info)} pages from pdf_info")
-        
-        # Enhanced processing pipeline following MinerU's approach
-        all_blocks = []
-        block_groups = {}  # Track block groups (images/tables with captions)
-        content_mapping = {}  # Map content snippets to track consolidation
-        inline_equations = []  # Track inline equations found in text spans
-        
-        # Stage 1: Collect all blocks and analyze relationships
-        for page_idx, page_data in enumerate(pdf_info):
-            page_blocks = []
-            if isinstance(page_data, dict):
-                if "para_blocks" in page_data:
-                    page_blocks = page_data["para_blocks"]
-                elif "preproc_blocks" in page_data:
-                    page_blocks = page_data["preproc_blocks"]
-            
-            if not page_blocks:
-                continue
+        logger.info(f"Processing {len(pdf_info)} pages from middle JSON")
 
-            for block_idx, block in enumerate(page_blocks):
-                if not isinstance(block, dict):
-                    continue
+        # Stage 1: Collect all blocks and analyze relationships  
+        all_blocks = []
+        block_groups = {}
+        content_mapping = {}
+        inline_equations = []
+
+        for page_idx, page in enumerate(pdf_info):
+            if not page.get('para_blocks'):
+                continue
                 
-                # Extract comprehensive block metadata
-                block_info = {
-                    'page_idx': page_idx,
-                    'block_idx': block_idx,
-                    'block': block,
-                    'type': block.get("type", "text"),
-                    'bbox': block.get("bbox", [0, 0, 0, 0]),
-                    'score': block.get("score", 0.5),
-                    'lines_deleted': block.get("lines_deleted", False),
-                    'has_content': False,
-                    'content_snippets': [],
-                    'inline_equations': [],
-                    'group_id': block.get("group_id"),
-                    'sub_blocks': []
-                }
-                
-                # Process hierarchical blocks (images/tables with captions)
-                if "blocks" in block:
-                    for sub_block in block["blocks"]:
-                        if isinstance(sub_block, dict):
-                            sub_type = sub_block.get("type", "")
-                            sub_info = {
-                                'type': sub_type,
-                                'bbox': sub_block.get("bbox", block_info['bbox']),
-                                'score': sub_block.get("score", block_info['score']),
-                                'group_id': sub_block.get("group_id", block_info['group_id']),
-                                'content': self._extract_content_from_block(sub_block)
-                            }
-                            block_info['sub_blocks'].append(sub_info)
-                            
-                            # Track block groups
-                            if block_info['group_id'] is not None:
-                                group_id = f"page_{page_idx}_group_{block_info['group_id']}"
-                                if group_id not in block_groups:
-                                    block_groups[group_id] = {'body': None, 'captions': [], 'footnotes': []}
-                                
-                                if 'body' in sub_type:
-                                    block_groups[group_id]['body'] = sub_info
-                                elif 'caption' in sub_type:
-                                    block_groups[group_id]['captions'].append(sub_info)
-                                elif 'footnote' in sub_type:
-                                    block_groups[group_id]['footnotes'].append(sub_info)
-                
-                # Extract content and analyze for consolidation patterns
-                if block.get("lines"):
-                    block_content = ""
-                    for line in block["lines"]:
-                        if isinstance(line, dict) and line.get("spans"):
-                            for span in line["spans"]:
-                                if isinstance(span, dict):
-                                    span_content = span.get("content", "")
-                                    span_type = span.get("type", "text")
-                                    
-                                    if span_content.strip():
-                                        block_content += span_content + " "
-                                        block_info['has_content'] = True
-                                        
-                                        # Track inline equations
-                                        if span_type == "inline_equation":
-                                            equation_info = {
-                                                'content': span_content.strip(),
-                                                'bbox': span.get("bbox", block_info['bbox']),
-                                                'page_idx': page_idx,
-                                                'parent_block_idx': block_idx
-                                            }
-                                            block_info['inline_equations'].append(equation_info)
-                                            inline_equations.append(equation_info)
-                                        
-                                        # Create content mapping for consolidation tracking
-                                        if len(span_content.strip()) > 15:  # Substantial content only
-                                            snippet_key = span_content.strip()[:50]
-                                            if snippet_key not in content_mapping:
-                                                content_mapping[snippet_key] = []
-                                            content_mapping[snippet_key].append({
-                                                'block_info': block_info,
-                                                'full_content': span_content,
-                                                'span_type': span_type
-                                            })
+            for block_idx, block in enumerate(page['para_blocks']):
+                # Handle structured block groups (images/tables with nested blocks)
+                if block.get('type') in ['image', 'table']:
+                    group_id = f"{block['type']}_{page_idx}_{block_idx}"
                     
-                    # Store content snippets for deleted block reconstruction
-                    if block_content.strip():
-                        block_info['content_snippets'] = [block_content.strip()[:100]]
-                
-                all_blocks.append(block_info)
-        
-        logger.info(f"Stage 1 complete: {len(all_blocks)} blocks, {len(block_groups)} groups, {len(inline_equations)} inline equations")
-        
-        # Stage 2: Create elements following MinerU's processing order
+                    block_groups[group_id] = {
+                        'type': block['type'],
+                        'body': None,
+                        'captions': [],
+                        'footnotes': []
+                    }
+                    
+                    # Process nested blocks
+                    if block.get('blocks'):
+                        for nested_block in block['blocks']:
+                            nested_type = nested_block.get('type', '')
+                            
+                            if nested_type == f"{block['type']}_body":
+                                # Extract content from body block
+                                content = ""
+                                image_path = ""
+                                html_content = ""
+                                
+                                if nested_block.get('lines'):
+                                    for line in nested_block['lines']:
+                                        if line.get('spans'):
+                                            for span in line['spans']:
+                                                if span.get('type') == block['type']:
+                                                    if span.get('image_path'):
+                                                        image_path = span['image_path']
+                                                    if span.get('html'):
+                                                        html_content = span['html']
+                                                    if span.get('content'):
+                                                        content += span['content']
+                                
+                                block_groups[group_id]['body'] = {
+                                    'type': nested_type,
+                                    'content': content or image_path or html_content or "",
+                                    'bbox': nested_block.get('bbox', block.get('bbox', [0, 0, 0, 0])),
+                                    'score': 0.95,
+                                    'image_path': image_path,
+                                    'html_content': html_content
+                                }
+                                
+                            elif nested_type == f"{block['type']}_caption":
+                                # Extract caption content
+                                caption_content = ""
+                                if nested_block.get('lines'):
+                                    for line in nested_block['lines']:
+                                        if line.get('spans'):
+                                            for span in line['spans']:
+                                                if span.get('content'):
+                                                    caption_content += span['content']
+                                
+                                block_groups[group_id]['captions'].append({
+                                    'type': nested_type,
+                                    'content': caption_content,
+                                    'bbox': nested_block.get('bbox', [0, 0, 0, 0]),
+                                    'score': 0.95
+                                })
+                                
+                            elif nested_type == f"{block['type']}_footnote":
+                                # Extract footnote content  
+                                footnote_content = ""
+                                if nested_block.get('lines'):
+                                    for line in nested_block['lines']:
+                                        if line.get('spans'):
+                                            for span in line['spans']:
+                                                if span.get('content'):
+                                                    footnote_content += span['content']
+                                
+                                block_groups[group_id]['footnotes'].append({
+                                    'type': nested_type,
+                                    'content': footnote_content,
+                                    'bbox': nested_block.get('bbox', [0, 0, 0, 0]),
+                                    'score': 0.95
+                                })
+                    
+                    # Skip adding this to all_blocks since it's handled as a group
+                    continue
+
+                # Handle regular blocks (text, title, etc.)
+                content = ""
+                has_lines_deleted = block.get('lines_deleted', False)
+                has_inline_equations = False
+
+                # Process lines and spans for content extraction
+                if block.get('lines'):
+                    for line in block['lines']:
+                        if line.get('spans'):
+                            for span in line['spans']:
+                                if span.get('type') == 'inline_equation':
+                                    # Track inline equations
+                                    inline_equations.append({
+                                        'content': span.get('content', ''),
+                                        'bbox': span.get('bbox', [0, 0, 0, 0]),
+                                        'pageNumber': page_idx + 1,
+                                        'parent_block_idx': len(all_blocks)
+                                    })
+                                    has_inline_equations = True
+                                elif span.get('content'):
+                                    content += span['content'] + " "
+
+                # Store block metadata
+                all_blocks.append({
+                    'block_idx': len(all_blocks),
+                    'page_idx': page_idx,
+                    'type': block.get('type', 'text'),
+                    'content': content.strip(),
+                    'bbox': block.get('bbox', [0, 0, 0, 0]),
+                    'score': 0.95,
+                    'lines_deleted': has_lines_deleted,
+                    'has_inline_equations': has_inline_equations,
+                    'original_index': block.get('index'),
+                    'level': block.get('level')
+                })
+
+                # Handle content mapping for deleted blocks
+                if has_lines_deleted and content.strip():
+                    content_mapping[len(all_blocks) - 1] = {
+                        'original_content': content.strip(),
+                        'bbox': block.get('bbox', [0, 0, 0, 0]),
+                        'page_idx': page_idx
+                    }
+
+        logger.info(f"Collected {len(all_blocks)} blocks, {len(block_groups)} block groups, {len(inline_equations)} inline equations")
+
+        # Stage 2: Create elements in processing order
         processed_elements = []
         
-        # 2a: Process inline equations as separate elements first (like MinerU's approach)
-        for eq_info in inline_equations:
-            equation_element = MinerUElement(
+        # 2a: Process inline equations first (like MinerU does)
+        for eq in inline_equations:
+            processed_elements.append(MinerUElement(
                 type="equation",
-                content=eq_info['content'],
-                bbox=self._convert_bbox_array(eq_info['bbox']),
-                pageNumber=eq_info['page_idx'] + 1,
+                content=eq['content'],
+                bbox=self._convert_bbox_array(eq['bbox']),
+                pageNumber=eq['pageNumber'],
                 hierarchy=None,
                 confidence=0.95,
-                metadata=ElementMetadata(equationType="inline")
-            )
-            equation_element.__dict__["_mineru_metadata"] = {
-                "source": "mineru_middle_json",
-                "original_type": "inline_equation",
-                "parent_block_idx": eq_info['parent_block_idx'],
-                "processing_stage": "inline_extraction"
-            }
-            processed_elements.append(equation_element)
-        
-        # 2b: Process block groups (images/tables with captions) 
+                metadata=ElementMetadata(
+                    equationType="inline"
+                )
+            ))
+
+        # 2b: Process block groups (images/tables with captions)
         for group_id, group_data in block_groups.items():
             if group_data['body']:
                 body = group_data['body']
-                
-                # Create main element (image/table)
-                main_type = "image" if "image" in body['type'] else "table" if "table" in body['type'] else "text"
-                
+                main_type = group_data['type']  # "image" or "table"
+
+                # Create main element with appropriate content
+                element_content = body['content']
+                if main_type == "image" and body['image_path']:
+                    element_content = body['image_path']
+                elif main_type == "table" and body['html_content']:
+                    element_content = body['html_content']
+
+                # Create main element
                 main_element = MinerUElement(
                     type=main_type,
-                    content=body['content'],
+                    content=element_content,
                     bbox=self._convert_bbox_array(body['bbox']),
                     pageNumber=int(group_id.split('_')[1]) + 1,
                     hierarchy=None,
                     confidence=body['score'],
-                    metadata=None
+                    metadata=ElementMetadata(
+                        imageData=body['image_path'] if main_type == "image" else None,
+                        tableCaption=None if main_type == "image" else element_content,
+                        figureCaption=None if main_type == "table" else element_content
+                    )
                 )
-                main_element.__dict__["_mineru_metadata"] = {
-                    "source": "mineru_middle_json",
-                    "original_type": body['type'],
-                    "group_id": group_id,
-                    "processing_stage": "group_body"
-                }
                 processed_elements.append(main_element)
-                
+
                 # Create caption elements
                 for caption in group_data['captions']:
                     if caption['content'].strip():
@@ -652,98 +678,57 @@ class MinerUProcessor:
                                 tableCaption=caption['content'].strip() if main_type == "table" else None
                             )
                         )
-                        caption_element.__dict__["_mineru_metadata"] = {
-                            "source": "mineru_middle_json",
-                            "original_type": caption['type'],
-                            "group_id": group_id,
-                            "parent_element_type": main_type,
-                            "processing_stage": "group_caption"
-                        }
                         processed_elements.append(caption_element)
-        
-        # 2c: Process remaining individual blocks (text, titles, equations)
-        grouped_block_indices = set()
-        for group_data in block_groups.values():
-            # Mark blocks already processed in groups
-            if group_data['body']:
-                for block_info in all_blocks:
-                    if (block_info['group_id'] is not None and 
-                        any(sub['type'] == group_data['body']['type'] for sub in block_info['sub_blocks'])):
-                        grouped_block_indices.add(block_info['block_idx'])
-        
+
+                # Create footnote elements if any
+                for footnote in group_data['footnotes']:
+                    if footnote['content'].strip():
+                        footnote_element = MinerUElement(
+                            type="caption",  # Treat footnotes as captions for now
+                            content=footnote['content'].strip(),
+                            bbox=self._convert_bbox_array(footnote['bbox']),
+                            pageNumber=int(group_id.split('_')[1]) + 1,
+                            hierarchy=None,
+                            confidence=footnote['score'],
+                            metadata=ElementMetadata(
+                                figureCaption=footnote['content'].strip() if main_type == "image" else None,
+                                tableCaption=footnote['content'].strip() if main_type == "table" else None
+                            )
+                        )
+                        processed_elements.append(footnote_element)
+
+        # 2c: Process remaining individual blocks (text, titles)
         for block_info in all_blocks:
-            # Skip blocks already processed in groups
-            if block_info['block_idx'] in grouped_block_indices:
+            # Skip blocks with no content
+            if not block_info['content'].strip():
                 continue
+
+            block_type = "text"
+            if block_info['type'] in ['title', 'heading']:
+                block_type = "title"
+
+            confidence = block_info['score']
             
-            block = block_info['block']
-            element_type = block_info['type']
-            
-            # Map MinerU types to our types
-            if element_type == "title":
-                our_type = "title"
-            elif element_type in ["interline_equation", "equation"]:
-                our_type = "equation"
-            elif element_type == "image":
-                our_type = "image"
-            elif element_type == "table":
-                our_type = "table"
-            else:
-                our_type = "text"
-            
-            # Handle content reconstruction for deleted blocks
-            if block_info['lines_deleted']:
-                # Attempt content reconstruction using consolidation mapping
-                reconstructed_content = ""
-                if block_info['content_snippets']:
-                    snippet = block_info['content_snippets'][0][:50]
-                    if snippet in content_mapping:
-                        # Find the non-deleted block containing this content
-                        for content_ref in content_mapping[snippet]:
-                            if not content_ref['block_info']['lines_deleted']:
-                                reconstructed_content = content_ref['full_content']
-                                break
-                
-                if not reconstructed_content:
-                    reconstructed_content = f"[Reconstructed {our_type} element - content consolidated]"
-                
+            # Handle reconstructed content for deleted blocks
+            if block_info['lines_deleted'] and block_info['block_idx'] in content_mapping:
                 confidence = 0.75  # Lower confidence for reconstructed elements
-                content = reconstructed_content
-            else:
-                content = self._extract_content_from_block(block)
-                confidence = block_info['score']
-            
-            # Skip empty elements
-            if not content.strip():
-                continue
-            
-            element = MinerUElement(
-                type=our_type,
-                content=content.strip(),
+
+            processed_elements.append(MinerUElement(
+                type=block_type,
+                content=block_info['content'],
                 bbox=self._convert_bbox_array(block_info['bbox']),
                 pageNumber=block_info['page_idx'] + 1,
-                hierarchy=None,
+                hierarchy=None if not block_info.get('level') else {"level": block_info['level']},
                 confidence=confidence,
                 metadata=None
-            )
-            
-            element.__dict__["_mineru_metadata"] = {
-                "source": "mineru_middle_json",
-                "original_type": element_type,
-                "block_index": block_info['block_idx'],
-                "was_deleted": block_info['lines_deleted'],
-                "reconstructed": block_info['lines_deleted'],
-                "processing_stage": "individual_block"
-            }
-            
-            processed_elements.append(element)
-        
-        # Stage 3: Sort elements by reading order (following MinerU's block_sort logic)
-        processed_elements.sort(key=lambda e: (e.pageNumber, e.bbox.y, e.bbox.x))
-        
-        logger.info(f"Enhanced processing complete: {len(processed_elements)} elements created")
-        logger.info(f"Element breakdown: {dict(collections.Counter(e.type for e in processed_elements))}")
-        
+            ))
+
+        # Stage 3: Sort elements by reading order
+        processed_elements.sort(key=lambda x: (x.pageNumber, x.bbox.y, x.bbox.x))
+
+        logger.info(f"Successfully processed {len(processed_elements)} elements from middle JSON")
+        logger.info(f"Element breakdown: {self._get_element_type_counts(processed_elements)}")
+
         return processed_elements
     
     def _convert_bbox_array(self, bbox_array) -> BoundingBox:
@@ -1255,6 +1240,12 @@ class MinerUProcessor:
         logger.info(f"Converted {len(elements)} elements from MinerU content_list")
         return elements
 
+    def _get_element_type_counts(self, elements):
+        """Helper method to get count of each element type"""
+        counts = {}
+        for element in elements:
+            counts[element.type] = counts.get(element.type, 0) + 1
+        return counts
 
     async def process_pdf_raw(self, pdf_path: str, options: ProcessingOptions, force: bool = False) -> Dict:
         """Process PDF and return raw MinerU output files"""
