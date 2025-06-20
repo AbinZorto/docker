@@ -575,6 +575,7 @@ class MinerUProcessor:
                 content = ""
                 has_lines_deleted = block.get('lines_deleted', False)
                 has_inline_equations = False
+                additional_content_spans = []  # Track spans that might be from other consolidated blocks
 
                 # Process lines and spans for content extraction
                 if block.get('lines'):
@@ -592,6 +593,31 @@ class MinerUProcessor:
                                     has_inline_equations = True
                                 elif span.get('content'):
                                     content += span['content'] + " "
+                                    
+                                    # Check if this span might be from a different logical block
+                                    # (based on significantly different bounding box from parent block)
+                                    if span.get('bbox') and block.get('bbox'):
+                                        span_bbox = span['bbox']
+                                        block_bbox = block['bbox']
+                                        
+                                        # Calculate if span is significantly displaced from block
+                                        span_center_x = span_bbox[0] + (span_bbox[2] - span_bbox[0]) / 2
+                                        span_center_y = span_bbox[1] + (span_bbox[3] - span_bbox[1]) / 2
+                                        block_center_x = block_bbox[0] + (block_bbox[2] - block_bbox[0]) / 2
+                                        block_center_y = block_bbox[1] + (block_bbox[3] - block_bbox[1]) / 2
+                                        
+                                        x_distance = abs(span_center_x - block_center_x)
+                                        y_distance = abs(span_center_y - block_center_y)
+                                        
+                                        # If span is far from block center, it might be consolidated content
+                                        if x_distance > 100 or y_distance > 50:
+                                            additional_content_spans.append({
+                                                'content': span['content'],
+                                                'bbox': span['bbox'],
+                                                'type': span.get('type', 'text'),
+                                                'page_idx': page_idx,
+                                                'source_block_idx': len(all_blocks)
+                                            })
 
                 # Store block metadata
                 all_blocks.append({
@@ -604,7 +630,8 @@ class MinerUProcessor:
                     'lines_deleted': has_lines_deleted,
                     'has_inline_equations': has_inline_equations,
                     'original_index': block.get('index'),
-                    'level': block.get('level')
+                    'level': block.get('level'),
+                    'additional_spans': additional_content_spans
                 })
 
                 # Handle content mapping for deleted blocks
@@ -614,8 +641,31 @@ class MinerUProcessor:
                         'bbox': block.get('bbox', [0, 0, 0, 0]),
                         'page_idx': page_idx
                     }
+                
+                # Process additional spans as separate elements if they're significantly displaced
+                for span_info in additional_content_spans:
+                    if len(span_info['content'].strip()) > 20:  # Only for substantial content
+                        all_blocks.append({
+                            'block_idx': len(all_blocks),
+                            'page_idx': span_info['page_idx'],
+                            'type': span_info['type'],
+                            'content': span_info['content'].strip(),
+                            'bbox': span_info['bbox'],
+                            'score': 0.85,  # Slightly lower confidence for extracted spans
+                            'lines_deleted': False,
+                            'has_inline_equations': False,
+                            'original_index': None,
+                            'level': None,
+                            'additional_spans': [],
+                            'source': 'extracted_span'
+                        })
 
         logger.info(f"Collected {len(all_blocks)} blocks, {len(block_groups)} block groups, {len(inline_equations)} inline equations")
+        
+        # Report on extracted spans
+        extracted_spans = [b for b in all_blocks if b.get('source') == 'extracted_span']
+        if extracted_spans:
+            logger.info(f"Extracted {len(extracted_spans)} displaced content spans from consolidated blocks")
 
         # Stage 2: Create elements in processing order
         processed_elements = []
