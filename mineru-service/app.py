@@ -479,7 +479,11 @@ class MinerUProcessor:
             return elements
 
         logger.debug(f"Processing {len(pdf_info)} pages from pdf_info")
-
+        
+        # First pass: collect all elements including deleted ones
+        all_blocks = []
+        content_map = {}  # Map content snippets to their containing elements
+        
         for page_idx, page_data in enumerate(pdf_info):
             page_blocks = []
             if isinstance(page_data, dict):
@@ -497,121 +501,214 @@ class MinerUProcessor:
             for block in page_blocks:
                 if not isinstance(block, dict):
                     continue
-                        
-                element_type = block.get("type", "text")
-                bbox_array = block.get("bbox", [0, 0, 0, 0])
-                block_index = block.get("index", 0)
                 
-                # Convert bbox from [x1, y1, x2, y2] to our format
-                if len(bbox_array) >= 4:
-                    x1, y1, x2, y2 = bbox_array[:4]
-                    # Convert to normalized coordinates (assuming page dimensions)
-                    # For now, we'll use absolute coordinates and normalize later
-                    bbox = BoundingBox(
-                        x=float(x1), 
-                        y=float(y1), 
-                        width=float(x2 - x1), 
-                        height=float(y2 - y1)
-                    )
-                else:
-                    bbox = BoundingBox(x=0.0, y=0.0, width=0.0, height=0.0)
+                block_info = {
+                    'page_idx': page_idx,
+                    'block': block,
+                    'has_content': False,
+                    'is_deleted': block.get("lines_deleted", False),
+                    'content_snippets': []
+                }
                 
-                # Extract text content from lines and spans
-                text_content = ""
-                if "lines" in block:
+                # Extract content snippets for mapping
+                if block.get("lines"):
                     for line in block["lines"]:
-                        if isinstance(line, dict) and "spans" in line:
+                        if isinstance(line, dict) and line.get("spans"):
                             for span in line["spans"]:
-                                if isinstance(span, dict) and "content" in span:
-                                    text_content += span["content"] + " "
+                                if isinstance(span, dict) and span.get("content"):
+                                    snippet = span["content"].strip()
+                                    if len(snippet) > 20:  # Only track substantial content
+                                        block_info['content_snippets'].append(snippet[:50])  # First 50 chars
+                                        content_map[snippet[:50]] = block_info
+                                    block_info['has_content'] = True
                 
-                # Handle image blocks specially
-                if element_type == "image":
-                    # Look for image_body and image_caption in blocks
-                    image_content = ""
-                    image_caption = ""
-                    
-                    if "blocks" in block:
-                        for sub_block in block["blocks"]:
-                            if sub_block.get("type") == "image_body":
-                                # Extract image path
-                                for line in sub_block.get("lines", []):
-                                    for span in line.get("spans", []):
-                                        if span.get("type") == "image" and "image_path" in span:
-                                            image_content = span["image_path"]
-                                
-                            elif sub_block.get("type") == "image_caption":
-                                # Extract caption text
-                                for line in sub_block.get("lines", []):
-                                    for span in line.get("spans", []):
-                                        if "content" in span:
-                                            image_caption += span["content"] + " "
-                    
-                    # Create separate elements for image and caption
-                    if image_content:
-                        image_element = MinerUElement(
-                            type="image",
-                            content=image_content,
-                            bbox=bbox,
-                            pageNumber=page_idx + 1,
-                            hierarchy=None,
-                            confidence=0.95,
-                            metadata=None
-                        )
-                        image_element.__dict__["_mineru_metadata"] = {
-                            "source": "mineru_middle_json",
-                            "original_type": "image_body",
-                            "block_index": block_index
-                        }
-                        elements.append(image_element)
-                    
-                    if image_caption.strip():
-                        caption_element = MinerUElement(
-                            type="caption",
-                            content=image_caption.strip(),
-                            bbox=bbox,  # Same bbox for now, could be refined
-                            pageNumber=page_idx + 1,
-                            hierarchy=None,
-                            confidence=0.95,
-                            metadata=ElementMetadata(figureCaption=image_caption.strip())
-                        )
-                        caption_element.__dict__["_mineru_metadata"] = {
-                            "source": "mineru_middle_json",
-                            "original_type": "image_caption",
-                            "block_index": block_index
-                        }
-                        elements.append(caption_element)
+                all_blocks.append(block_info)
+        
+        logger.info(f"Found {len(all_blocks)} total blocks, {len([b for b in all_blocks if b['is_deleted']])} marked as deleted")
+        
+        # Second pass: process all blocks, reconstructing deleted ones
+        for block_info in all_blocks:
+            block = block_info['block']
+            page_idx = block_info['page_idx']
+            is_deleted = block_info['is_deleted']
+            
+            element_type = block.get("type", "text")
+            bbox_array = block.get("bbox", [0, 0, 0, 0])
+            block_index = block.get("index", 0)
+            
+            # Convert bbox from [x1, y1, x2, y2] to our format
+            if len(bbox_array) >= 4:
+                x1, y1, x2, y2 = bbox_array[:4]
+                bbox = BoundingBox(
+                    x=float(x1), 
+                    y=float(y1), 
+                    width=float(x2 - x1), 
+                    height=float(y2 - y1)
+                )
+            else:
+                bbox = BoundingBox(x=0.0, y=0.0, width=0.0, height=0.0)
+            
+            # Extract content
+            text_content = ""
+            latex_content = ""
+            
+            if is_deleted:
+                # For deleted elements, try to reconstruct content from consolidated elements
+                if block_info['content_snippets']:
+                    # Try to find the content in other elements
+                    for snippet in block_info['content_snippets']:
+                        if snippet in content_map:
+                            source_block_info = content_map[snippet]
+                            if not source_block_info['is_deleted']:
+                                # Extract the relevant content from the source block
+                                source_content = self._extract_content_from_block(source_block_info['block'])
+                                # Try to extract the portion that belongs to this deleted element
+                                if snippet in source_content:
+                                    start_idx = source_content.find(snippet)
+                                    # Extract a reasonable chunk around this snippet
+                                    end_idx = min(start_idx + 200, len(source_content))
+                                    text_content = source_content[start_idx:end_idx].strip()
+                                    break
                 
-                else:
-                    # Handle text, title, and other elements
-                    text_content = text_content.strip()
-                    if text_content:
-                        # Determine if this is likely a heading based on type and content
-                        if element_type == "title" or self._looks_like_heading(text_content):
-                            element_type = "heading"
-                        
-                        element = MinerUElement(
-                            type=element_type,
-                            content=text_content,
-                            bbox=bbox,
-                            pageNumber=page_idx + 1,
-                            hierarchy=None,  # Will be determined later based on content
-                            confidence=0.95,
-                            metadata=None  # We'll store metadata separately for now
-                        )
-                        # Store metadata as a custom attribute for our processing
-                        element.__dict__["_mineru_metadata"] = {
-                            "source": "mineru_middle_json",
-                            "original_type": block.get("type", "unknown"),
-                            "block_index": block_index
-                        }
-                        elements.append(element)
+                # If we couldn't reconstruct content, use a placeholder
+                if not text_content:
+                    text_content = f"[Reconstructed {element_type} element]"
+                    
+            else:
+                # For non-deleted elements, extract content normally
+                text_content = self._extract_content_from_block(block)
+                
+                # Handle inline equations specially
+                if block.get("lines"):
+                    for line in block["lines"]:
+                        if isinstance(line, dict) and line.get("spans"):
+                            for span in line["spans"]:
+                                if isinstance(span, dict):
+                                    span_type = span.get("type", "text")
+                                    span_content = span.get("content", "")
+                                    
+                                    if span_type == "inline_equation":
+                                        latex_content += span_content + " "
+                                        # Create separate equation element for inline equations
+                                        if span_content.strip():
+                                            equation_element = MinerUElement(
+                                                type="equation",
+                                                content=span_content.strip(),
+                                                bbox=bbox,  # Use same bbox for now
+                                                pageNumber=page_idx + 1,
+                                                hierarchy=None,
+                                                confidence=0.95,
+                                                metadata=None
+                                            )
+                                            equation_element.__dict__["_mineru_metadata"] = {
+                                                "source": "mineru_middle_json",
+                                                "original_type": "inline_equation",
+                                                "block_index": block_index,
+                                                "parent_block_index": block_index
+                                            }
+                                            elements.append(equation_element)
+            
+            # Handle image blocks specially
+            if element_type == "image":
+                image_content = ""
+                image_caption = ""
+                
+                if "blocks" in block:
+                    for sub_block in block["blocks"]:
+                        if sub_block.get("type") == "image_body":
+                            for line in sub_block.get("lines", []):
+                                for span in line.get("spans", []):
+                                    if span.get("type") == "image" and "image_path" in span:
+                                        image_content = span["image_path"]
+                        elif sub_block.get("type") == "image_caption":
+                            for line in sub_block.get("lines", []):
+                                for span in line.get("spans", []):
+                                    if "content" in span:
+                                        image_caption += span["content"] + " "
+                
+                # Create separate elements for image and caption
+                if image_content:
+                    image_element = MinerUElement(
+                        type="image",
+                        content=image_content,
+                        bbox=bbox,
+                        pageNumber=page_idx + 1,
+                        hierarchy=None,
+                        confidence=0.95,
+                        metadata=None
+                    )
+                    image_element.__dict__["_mineru_metadata"] = {
+                        "source": "mineru_middle_json",
+                        "original_type": "image_body",
+                        "block_index": block_index,
+                        "was_deleted": is_deleted
+                    }
+                    elements.append(image_element)
+                
+                if image_caption.strip():
+                    caption_element = MinerUElement(
+                        type="caption",
+                        content=image_caption.strip(),
+                        bbox=bbox,
+                        pageNumber=page_idx + 1,
+                        hierarchy=None,
+                        confidence=0.95,
+                        metadata=ElementMetadata(figureCaption=image_caption.strip())
+                    )
+                    caption_element.__dict__["_mineru_metadata"] = {
+                        "source": "mineru_middle_json",
+                        "original_type": "image_caption",
+                        "block_index": block_index,
+                        "was_deleted": is_deleted
+                    }
+                    elements.append(caption_element)
+            
+            else:
+                # Handle text, title, and other elements
+                text_content = text_content.strip()
+                if text_content:
+                    # Determine element type
+                    final_type = element_type
+                    if element_type == "title" or self._looks_like_heading(text_content):
+                        final_type = "title"
+                    
+                    element = MinerUElement(
+                        type=final_type,
+                        content=text_content,
+                        bbox=bbox,
+                        pageNumber=page_idx + 1,
+                        hierarchy=None,
+                        confidence=0.95 if not is_deleted else 0.75,  # Lower confidence for reconstructed
+                        metadata=None
+                    )
+                    element.__dict__["_mineru_metadata"] = {
+                        "source": "mineru_middle_json",
+                        "original_type": block.get("type", "unknown"),
+                        "block_index": block_index,
+                        "was_deleted": is_deleted,
+                        "reconstructed": is_deleted
+                    }
+                    elements.append(element)
         
         # Sort elements by page and block index for proper order
         elements.sort(key=lambda x: (x.pageNumber, getattr(x, '_mineru_metadata', {}).get("block_index", 0)))
         
-        logger.info(f"Converted {len(elements)} elements from MinerU middle JSON")
+        deleted_count = len([e for e in elements if getattr(e, '_mineru_metadata', {}).get('was_deleted', False)])
+        logger.info(f"Converted {len(elements)} elements from MinerU middle JSON ({deleted_count} reconstructed from deleted elements)")
         return elements
+    
+    def _extract_content_from_block(self, block) -> str:
+        """Extract text content from a block's lines and spans"""
+        content = ""
+        
+        if block.get("lines"):
+            for line in block["lines"]:
+                if isinstance(line, dict) and line.get("spans"):
+                    for span in line["spans"]:
+                        if isinstance(span, dict) and span.get("content"):
+                            content += span["content"] + " "
+        
+        return content.strip()
     
     def _enhance_elements_with_model_data(self, elements: List[MinerUElement], model_data: dict) -> List[MinerUElement]:
         """Enhance elements with raw model detection data for better bounding boxes and classification"""
