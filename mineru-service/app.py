@@ -516,15 +516,6 @@ class MinerUProcessor:
                 else:
                     bbox = BoundingBox(x=0.0, y=0.0, width=0.0, height=0.0)
                 
-                # Extract text content from lines and spans
-                text_content = ""
-                if "lines" in block:
-                    for line in block["lines"]:
-                        if isinstance(line, dict) and "spans" in line:
-                            for span in line["spans"]:
-                                if isinstance(span, dict) and "content" in span:
-                                    text_content += span["content"] + " "
-                
                 # Handle image blocks specially
                 if element_type == "image":
                     # Look for image_body and image_caption in blocks
@@ -582,30 +573,131 @@ class MinerUProcessor:
                         }
                         elements.append(caption_element)
                 
-                else:
-                    # Handle text, title, and other elements
-                    text_content = text_content.strip()
-                    if text_content:
-                        # Determine if this is likely a heading based on type and content
-                        if element_type == "title" or self._looks_like_heading(text_content):
-                            element_type = "heading"
-                        
-                        element = MinerUElement(
-                            type=element_type,
-                            content=text_content,
+                elif element_type == "table":
+                    table_html = ""
+                    table_caption = ""
+                    table_footnote = ""
+                    
+                    if "blocks" in block:
+                        for sub_block in block["blocks"]:
+                            sub_block_type = sub_block.get("type")
+                            
+                            # Extract HTML from table_body
+                            if sub_block_type == "table_body":
+                                for line in sub_block.get("lines", []):
+                                    for span in line.get("spans", []):
+                                        if span.get("type") == "table" and "html" in span:
+                                            table_html += span["html"]
+                            
+                            # Extract caption text
+                            elif sub_block_type == "table_caption":
+                                for line in sub_block.get("lines", []):
+                                    for span in line.get("spans", []):
+                                        if "content" in span:
+                                            table_caption += span["content"] + " "
+
+                            # Extract footnote text
+                            elif sub_block_type == "table_footnote":
+                                for line in sub_block.get("lines", []):
+                                    for span in line.get("spans", []):
+                                        if "content" in span:
+                                            table_footnote += span["content"] + " "
+
+                    if table_html:
+                        table_element = MinerUElement(
+                            type="table",
+                            content=table_html.strip(),
                             bbox=bbox,
                             pageNumber=page_idx + 1,
-                            hierarchy=None,  # Will be determined later based on content
+                            hierarchy=None,
                             confidence=0.95,
-                            metadata=None  # We'll store metadata separately for now
+                            metadata=ElementMetadata(
+                                tableCaption=table_caption.strip() if table_caption else None
+                            )
                         )
-                        # Store metadata as a custom attribute for our processing
-                        element.__dict__["_mineru_metadata"] = {
+                        table_element.__dict__["_mineru_metadata"] = {
                             "source": "mineru_middle_json",
-                            "original_type": block.get("type", "unknown"),
-                            "block_index": block_index
+                            "original_type": "table",
+                            "block_index": block_index,
+                            "footnote": table_footnote.strip() if table_footnote else None
                         }
-                        elements.append(element)
+                        elements.append(table_element)
+                
+                else:
+                    # Handle text, title, and other elements
+                    text_content = ""
+                    current_metadata = {}
+
+                    if "lines" in block:
+                        for line in block["lines"]:
+                            if isinstance(line, dict) and "spans" in line:
+                                for span in line["spans"]:
+                                    if isinstance(span, dict) and "content" in span:
+                                        span_type = span.get("type", "text")
+                                        span_content = span.get("content", "").strip()
+                                        
+                                        # Handle equations specifically
+                                        if span_type in ["equation", "inline_equation"] and span_content:
+                                            # If there's pending text, save it first
+                                            if text_content:
+                                                element = MinerUElement(
+                                                    type="text",
+                                                    content=text_content.strip(),
+                                                    bbox=bbox, # Note: bbox is for the whole block
+                                                    pageNumber=page_idx + 1,
+                                                    hierarchy=None,
+                                                    confidence=0.95,
+                                                    metadata=ElementMetadata(**current_metadata)
+                                                )
+                                                elements.append(element)
+                                                text_content = ""
+                                                current_metadata = {}
+
+                                            # Create and add the equation element
+                                            equation_element = MinerUElement(
+                                                type="equation",
+                                                content=span_content,
+                                                bbox=bbox, # Note: needs refinement for span-level bbox
+                                                pageNumber=page_idx + 1,
+                                                hierarchy=None,
+                                                confidence=0.95,
+                                                metadata=ElementMetadata(equationType=span_type)
+                                            )
+                                            equation_element.__dict__["_mineru_metadata"] = {
+                                                "source": "mineru_middle_json",
+                                                "original_type": span_type,
+                                                "block_index": block_index
+                                            }
+                                            elements.append(equation_element)
+                                        
+                                        # Append regular text
+                                        else:
+                                            text_content += span["content"] + " "
+
+
+                    if text_content: # Process any remaining text in the block
+                        text_content = text_content.strip()
+                        if text_content:
+                            # Determine if this is likely a heading based on type and content
+                            if element_type == "title" or self._looks_like_heading(text_content):
+                                element_type = "heading"
+                            
+                            element = MinerUElement(
+                                type=element_type,
+                                content=text_content,
+                                bbox=bbox,
+                                pageNumber=page_idx + 1,
+                                hierarchy=None,  # Will be determined later based on content
+                                confidence=0.95,
+                                metadata=None  # We'll store metadata separately for now
+                            )
+                            # Store metadata as a custom attribute for our processing
+                            element.__dict__["_mineru_metadata"] = {
+                                "source": "mineru_middle_json",
+                                "original_type": block.get("type", "unknown"),
+                                "block_index": block_index
+                            }
+                            elements.append(element)
         
         # Sort elements by page and block index for proper order
         elements.sort(key=lambda x: (x.pageNumber, getattr(x, '_mineru_metadata', {}).get("block_index", 0)))
