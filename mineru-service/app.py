@@ -814,6 +814,11 @@ class MinerUProcessor:
         # Try to remove titles from the beginning of content
         content_stripped = content.strip()
         
+        # Debug: Check for 3.4.5 Random Forest specifically
+        if "3.4.5" in content_stripped and "Random Forest" in content_stripped:
+            logger.debug(f"🔍 Processing content with 3.4.5 Random Forest: '{content_stripped[:100]}...'")
+            logger.debug(f"🔍 Available titles containing 3.4.5: {[t for t in known_titles if '3.4.5' in t]}")
+        
         for title in known_titles:
             if not title.strip():
                 continue
@@ -834,15 +839,23 @@ class MinerUProcessor:
                 last_period_spaced = re.sub(r'(\d+\.\d+\.\d+\.)([A-Za-z])', r'\1 \2', title)
                 if last_period_spaced != title:
                     title_variations.append(last_period_spaced)
+                    
+                # Debug for 3.4.5 case
+                if "3.4.5" in title:
+                    logger.debug(f"🔍 Created variations for '{title}': {title_variations}")
             
             for title_variant in title_variations:
                 if content_stripped.startswith(title_variant):
                     # Remove the title and any immediately following punctuation/whitespace
                     remaining = content_stripped[len(title_variant):].lstrip()
                     # Only remove if what remains looks like separate content
-                    if remaining and (remaining[0].isupper() or remaining[0].isdigit() or remaining.startswith('(')):
+                    if remaining and (remaining[0].isupper() or remaining[0].isdigit() or remaining.startswith(('(', '-', '•', '*', '1.', '2.', '3.', '4.', '5.'))):
                         logger.debug(f"Removed consolidated title '{title_variant}' from text content")
                         return remaining
+                    elif "3.4.5" in title_variant:
+                        logger.debug(f"🔍 3.4.5 title variant '{title_variant}' matched but remaining content doesn't qualify: '{remaining[:50]}...'")
+                elif "3.4.5" in title_variant and "3.4.5" in content_stripped:
+                    logger.debug(f"🔍 3.4.5 title variant '{title_variant}' does NOT start content: '{content_stripped[:50]}...'")
         
         return content
     
