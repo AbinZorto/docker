@@ -613,17 +613,41 @@ class MinerUProcessor:
                                     span_bbox = span.get('bbox', [0, 0, 0, 0])
                                     span_content = span['content']
                                     
-                                    # Simple check: is the span fully contained within the block?
+                                    # Improved content assignment logic
+                                    should_include_in_block = False
+                                    
                                     # If span has no bounding box info, include it by default
-                                    if (span_bbox == [0, 0, 0, 0] or 
-                                        (span_bbox[0] >= block_bbox[0] and 
-                                         span_bbox[1] >= block_bbox[1] and 
-                                         span_bbox[2] <= block_bbox[2] and 
-                                         span_bbox[3] <= block_bbox[3])):
-                                        # Span is fully within block bounds - include it
+                                    if span_bbox == [0, 0, 0, 0]:
+                                        should_include_in_block = True
+                                    else:
+                                        # Calculate overlap between span and block
+                                        span_bbox_obj = BoundingBox(
+                                            x=span_bbox[0], y=span_bbox[1],
+                                            width=span_bbox[2] - span_bbox[0],
+                                            height=span_bbox[3] - span_bbox[1]
+                                        )
+                                        block_bbox_obj = BoundingBox(
+                                            x=block_bbox[0], y=block_bbox[1],
+                                            width=block_bbox[2] - block_bbox[0],
+                                            height=block_bbox[3] - block_bbox[1]
+                                        )
+                                        
+                                        overlap_ratio = self._bbox_overlap_ratio(span_bbox_obj, block_bbox_obj)
+                                        
+                                        # Dynamic threshold based on content characteristics
+                                        threshold = 0.3  # Default threshold
+                                        if len(span_content.strip()) < 10:
+                                            threshold = 0.1  # Lower threshold for short content
+                                        elif span_content.strip().endswith('.') and len(span_content.strip()) < 50:
+                                            threshold = 0.1  # Lower threshold for sentence endings
+                                        
+                                        should_include_in_block = overlap_ratio >= threshold
+                                    
+                                    if should_include_in_block:
+                                        # Span belongs to this block
                                         content += span_content + " "
                                     else:
-                                        # Span extends outside block bounds - this is displaced content
+                                        # Span has low overlap - this is displaced content
                                         # Only create separate elements for substantial displaced content
                                         if len(span_content.strip()) > 15:
                                             additional_content_spans.append({
@@ -689,6 +713,20 @@ class MinerUProcessor:
 
         # Stage 2: Create elements in processing order
         processed_elements = []
+        
+        # First, collect all title content to remove from text blocks
+        known_titles = set()
+        for block_info in all_blocks:
+            if block_info['type'] in ['title', 'heading'] and block_info['content'].strip():
+                # Store normalized title for removal
+                title_text = block_info['content'].strip()
+                known_titles.add(title_text)
+                # Also store without punctuation for matching
+                title_clean = title_text.rstrip('.').rstrip(':').strip()
+                if title_clean != title_text:
+                    known_titles.add(title_clean)
+        
+        logger.info(f"Collected {len(known_titles)} known titles for deduplication")
         
         # 2a: Process inline equations first (like MinerU does)
         for eq in inline_equations:
@@ -778,6 +816,14 @@ class MinerUProcessor:
                 block_type = "title"
 
             confidence = block_info['score']
+            content = block_info['content']
+            
+            # Remove consolidated titles from text content (but not from title elements themselves)
+            if block_type == "text":
+                content = self._remove_consolidated_titles(content, known_titles)
+                # Skip if content becomes empty after title removal
+                if not content.strip():
+                    continue
             
             # Handle reconstructed content for deleted blocks
             if block_info['lines_deleted'] and block_info['block_idx'] in content_mapping:
@@ -793,7 +839,7 @@ class MinerUProcessor:
             
             processed_elements.append(MinerUElement(
                 type=block_type,
-                content=block_info['content'],
+                content=content,
                 bbox=self._convert_bbox_array(block_info['bbox']),
                 pageNumber=block_info['page_idx'] + 1,
                 hierarchy=hierarchy,
@@ -820,6 +866,29 @@ class MinerUProcessor:
                 height=float(y2 - y1)
             )
         return BoundingBox(x=0.0, y=0.0, width=0.0, height=0.0)
+    
+    def _remove_consolidated_titles(self, content: str, known_titles: set) -> str:
+        """Remove consolidated titles from text content"""
+        if not content.strip() or not known_titles:
+            return content
+        
+        # Try to remove titles from the beginning of content
+        content_stripped = content.strip()
+        
+        for title in known_titles:
+            if not title.strip():
+                continue
+                
+            # Check if content starts with this title
+            if content_stripped.startswith(title):
+                # Remove the title and any immediately following punctuation/whitespace
+                remaining = content_stripped[len(title):].lstrip()
+                # Only remove if what remains looks like separate content
+                if remaining and (remaining[0].isupper() or remaining[0].isdigit() or remaining.startswith('(')):
+                    logger.debug(f"Removed consolidated title '{title}' from text content")
+                    return remaining
+        
+        return content
     
     def _extract_content_from_block(self, block) -> str:
         """Extract text content from a block's lines and spans"""
