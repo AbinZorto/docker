@@ -826,6 +826,15 @@ class MinerUProcessor:
                 title.replace(' ', ''),    # Remove spaces
             ]
             
+            # Add special case for numbered headings like "3.4.5.Random Forest" -> "3.4.5. Random Forest"
+            # This handles cases where only the last period needs a space added
+            import re
+            if re.match(r'^\d+\.\d+\.\d+\.', title):  # Matches patterns like "3.4.5."
+                # For numbered headings, add space after the last period only
+                last_period_spaced = re.sub(r'(\d+\.\d+\.\d+\.)([A-Za-z])', r'\1 \2', title)
+                if last_period_spaced != title:
+                    title_variations.append(last_period_spaced)
+            
             for title_variant in title_variations:
                 if content_stripped.startswith(title_variant):
                     # Remove the title and any immediately following punctuation/whitespace
