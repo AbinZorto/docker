@@ -145,6 +145,7 @@ class MinerUElement(BaseModel):
     hierarchy: Optional[Hierarchy] = None
     confidence: float
     metadata: Optional[ElementMetadata] = None
+    originalIndex: Optional[int] = None
 
 class Section(BaseModel):
     title: str
@@ -783,11 +784,12 @@ class MinerUProcessor:
                 pageNumber=block_info['page_idx'] + 1,
                 hierarchy=hierarchy,
                 confidence=confidence,
-                metadata=None
+                metadata=None,
+                originalIndex=block_info.get('index')
             ))
 
-        # Stage 3: Sort elements by reading order
-        processed_elements.sort(key=lambda x: (x.pageNumber, x.bbox.y, x.bbox.x))
+        # Stage 3: Sort elements by their original index from the JSON file
+        processed_elements.sort(key=lambda x: (x.pageNumber, x.originalIndex if x.originalIndex is not None else float('inf')))
 
         logger.info(f"Successfully processed {len(processed_elements)} elements from middle JSON")
         logger.info(f"Element breakdown: {self._get_element_type_counts(processed_elements)}")
