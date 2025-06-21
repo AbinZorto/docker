@@ -575,7 +575,6 @@ class MinerUProcessor:
                 content = ""
                 has_lines_deleted = block.get('lines_deleted', False)
                 has_inline_equations = False
-                additional_content_spans = []  # Track spans that are completely outside this block
                 block_bbox = block.get('bbox', [0, 0, 0, 0])
 
                 # Process lines and spans for content extraction
@@ -610,53 +609,9 @@ class MinerUProcessor:
                                     content += readable_form + " "
                                     
                                 elif span.get('content'):
-                                    span_bbox = span.get('bbox', [0, 0, 0, 0])
                                     span_content = span['content']
-                                    
-                                    # Improved content assignment logic
-                                    should_include_in_block = False
-                                    
-                                    # If span has no bounding box info, include it by default
-                                    if span_bbox == [0, 0, 0, 0]:
-                                        should_include_in_block = True
-                                    else:
-                                        # Calculate overlap between span and block
-                                        span_bbox_obj = BoundingBox(
-                                            x=span_bbox[0], y=span_bbox[1],
-                                            width=span_bbox[2] - span_bbox[0],
-                                            height=span_bbox[3] - span_bbox[1]
-                                        )
-                                        block_bbox_obj = BoundingBox(
-                                            x=block_bbox[0], y=block_bbox[1],
-                                            width=block_bbox[2] - block_bbox[0],
-                                            height=block_bbox[3] - block_bbox[1]
-                                        )
-                                        
-                                        overlap_ratio = self._bbox_overlap_ratio(span_bbox_obj, block_bbox_obj)
-                                        
-                                        # Dynamic threshold based on content characteristics
-                                        threshold = 0.3  # Default threshold
-                                        if len(span_content.strip()) < 10:
-                                            threshold = 0.1  # Lower threshold for short content
-                                        elif span_content.strip().endswith('.') and len(span_content.strip()) < 50:
-                                            threshold = 0.1  # Lower threshold for sentence endings
-                                        
-                                        should_include_in_block = overlap_ratio >= threshold
-                                    
-                                    if should_include_in_block:
-                                        # Span belongs to this block
-                                        content += span_content + " "
-                                    else:
-                                        # Span has low overlap - this is displaced content
-                                        # Only create separate elements for substantial displaced content
-                                        if len(span_content.strip()) > 15:
-                                            additional_content_spans.append({
-                                                'content': span_content,
-                                                'bbox': span_bbox,
-                                                'type': span.get('type', 'text'),
-                                                'page_idx': page_idx,
-                                                'source_block_idx': len(all_blocks)
-                                            })
+                                    # Simply include all spans within the line - trust the nesting structure
+                                    content += span_content + " "
 
                 # Use the original MinerU type - no guessing or regex detection
                 final_content = content.strip()
@@ -673,8 +628,7 @@ class MinerUProcessor:
                     'lines_deleted': has_lines_deleted,
                     'has_inline_equations': has_inline_equations,
                     'original_index': block.get('index'),
-                    'level': block.get('level'),
-                    'additional_spans': additional_content_spans
+                    'level': block.get('level')
                 })
 
                 # Handle content mapping for deleted blocks
@@ -684,32 +638,8 @@ class MinerUProcessor:
                         'bbox': block.get('bbox', [0, 0, 0, 0]),
                         'page_idx': page_idx
                     }
-                
-                # Process additional spans as separate elements
-                for span_info in additional_content_spans:
-                    span_content = span_info['content'].strip()
-                    # Create a new element for this displaced span
-                    all_blocks.append({
-                        'block_idx': len(all_blocks),
-                        'page_idx': span_info['page_idx'],
-                        'type': span_info['type'],
-                        'content': span_content,
-                        'bbox': span_info['bbox'],
-                        'score': 0.85,  # Slightly lower confidence for extracted spans
-                        'lines_deleted': False,
-                        'has_inline_equations': False,
-                        'original_index': None,
-                        'level': None,
-                        'additional_spans': [],
-                        'source': 'extracted_span'
-                    })
 
         logger.info(f"Collected {len(all_blocks)} blocks, {len(block_groups)} block groups, {len(inline_equations)} inline equations")
-        
-        # Report on extracted spans
-        extracted_spans = [b for b in all_blocks if b.get('source') == 'extracted_span']
-        if extracted_spans:
-            logger.info(f"Extracted {len(extracted_spans)} displaced content spans from consolidated blocks")
 
         # Stage 2: Create elements in processing order
         processed_elements = []
@@ -878,15 +808,23 @@ class MinerUProcessor:
         for title in known_titles:
             if not title.strip():
                 continue
-                
-            # Check if content starts with this title
-            if content_stripped.startswith(title):
-                # Remove the title and any immediately following punctuation/whitespace
-                remaining = content_stripped[len(title):].lstrip()
-                # Only remove if what remains looks like separate content
-                if remaining and (remaining[0].isupper() or remaining[0].isdigit() or remaining.startswith('(')):
-                    logger.debug(f"Removed consolidated title '{title}' from text content")
-                    return remaining
+            
+            # Create variations of the title to match against
+            title_variations = [
+                title,  # Original title
+                title.replace('.', '. '),  # Add space after periods
+                title.replace('.', ''),    # Remove periods
+                title.replace(' ', ''),    # Remove spaces
+            ]
+            
+            for title_variant in title_variations:
+                if content_stripped.startswith(title_variant):
+                    # Remove the title and any immediately following punctuation/whitespace
+                    remaining = content_stripped[len(title_variant):].lstrip()
+                    # Only remove if what remains looks like separate content
+                    if remaining and (remaining[0].isupper() or remaining[0].isdigit() or remaining.startswith('(')):
+                        logger.debug(f"Removed consolidated title '{title_variant}' from text content")
+                        return remaining
         
         return content
     
