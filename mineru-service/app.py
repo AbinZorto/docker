@@ -575,7 +575,7 @@ class MinerUProcessor:
                 content = ""
                 has_lines_deleted = block.get('lines_deleted', False)
                 has_inline_equations = False
-                additional_content_spans = []  # Track spans that might be from other consolidated blocks
+                additional_content_spans = []  # Track spans that are completely outside this block
                 block_bbox = block.get('bbox', [0, 0, 0, 0])
 
                 # Process lines and spans for content extraction
@@ -613,67 +613,30 @@ class MinerUProcessor:
                                     span_bbox = span.get('bbox', [0, 0, 0, 0])
                                     span_content = span['content']
                                     
-                                    # Calculate overlap between span and block bounding boxes
-                                    span_area = (span_bbox[2] - span_bbox[0]) * (span_bbox[3] - span_bbox[1])
-                                    if span_area <= 0:
-                                        # Fallback: if span has no area, use content anyway
+                                    # Simple check: is the span fully contained within the block?
+                                    # If span has no bounding box info, include it by default
+                                    if (span_bbox == [0, 0, 0, 0] or 
+                                        (span_bbox[0] >= block_bbox[0] and 
+                                         span_bbox[1] >= block_bbox[1] and 
+                                         span_bbox[2] <= block_bbox[2] and 
+                                         span_bbox[3] <= block_bbox[3])):
+                                        # Span is fully within block bounds - include it
                                         content += span_content + " "
-                                        continue
-                                    
-                                    # Calculate intersection between span and block
-                                    x_left = max(block_bbox[0], span_bbox[0])
-                                    y_top = max(block_bbox[1], span_bbox[1])
-                                    x_right = min(block_bbox[2], span_bbox[2])
-                                    y_bottom = min(block_bbox[3], span_bbox[3])
-                                    
-                                    if x_left < x_right and y_top < y_bottom:
-                                        # There is intersection
-                                        intersection_area = (x_right - x_left) * (y_bottom - y_top)
-                                        overlap_ratio = intersection_area / span_area
-                                        
-                                        # Improved logic: Use more nuanced thresholds based on content type
-                                        threshold = 0.3  # Lower threshold for better content capture
-                                        
-                                        # For short content (likely part of titles), be more inclusive
-                                        if len(span_content.strip()) < 30:
-                                            threshold = 0.1
-                                        
-                                        # For content that looks like it continues a sentence, be more inclusive
-                                        if span_content.strip().startswith(('and', 'but', 'or', 'the', 'a', 'an', 'in', 'on', 'at', 'for', 'with', 'to')):
-                                            threshold = 0.1
-                                            
-                                        if overlap_ratio > threshold:
-                                            content += span_content + " "
-                                        else:
-                                            # This span is mostly outside the block - treat as displaced content
+                                    else:
+                                        # Span extends outside block bounds - this is displaced content
+                                        # Only create separate elements for substantial displaced content
+                                        if len(span_content.strip()) > 15:
                                             additional_content_spans.append({
                                                 'content': span_content,
                                                 'bbox': span_bbox,
                                                 'type': span.get('type', 'text'),
                                                 'page_idx': page_idx,
-                                                'source_block_idx': len(all_blocks),
-                                                'overlap_ratio': overlap_ratio
+                                                'source_block_idx': len(all_blocks)
                                             })
-                                    else:
-                                        # No intersection - definitely displaced content
-                                        additional_content_spans.append({
-                                            'content': span_content,
-                                            'bbox': span_bbox,
-                                            'type': span.get('type', 'text'),
-                                            'page_idx': page_idx,
-                                            'source_block_idx': len(all_blocks),
-                                            'overlap_ratio': 0.0
-                                        })
 
-                # Additional check: Prevent title consolidation into text blocks
-                # If this block has very short content and the next block exists, check if it should stay separate
+                # Use the original MinerU type - no guessing or regex detection
                 final_content = content.strip()
-                block_type = block.get('type', 'text')
-                
-                # Preserve title blocks as separate elements
-                if block_type in ['title', 'heading'] or (len(final_content) < 50 and any(char.isdigit() for char in final_content[:10])):
-                    # This looks like a title or section header - keep it separate
-                    pass  # Will be processed as is
+                block_type = block.get('type', 'text')  # Trust MinerU's type classification
                 
                 # Store block metadata
                 all_blocks.append({
@@ -698,26 +661,24 @@ class MinerUProcessor:
                         'page_idx': page_idx
                     }
                 
-                # Process additional spans as separate elements if they have substantial content
+                # Process additional spans as separate elements
                 for span_info in additional_content_spans:
                     span_content = span_info['content'].strip()
-                    if len(span_content) > 15:  # Slightly higher threshold for meaningful displaced content
-                        # Create a new element for this displaced span
-                        all_blocks.append({
-                            'block_idx': len(all_blocks),
-                            'page_idx': span_info['page_idx'],
-                            'type': span_info['type'],
-                            'content': span_content,
-                            'bbox': span_info['bbox'],
-                            'score': 0.85,  # Slightly lower confidence for extracted spans
-                            'lines_deleted': False,
-                            'has_inline_equations': False,
-                            'original_index': None,
-                            'level': None,
-                            'additional_spans': [],
-                            'source': 'extracted_span',
-                            'overlap_ratio': span_info['overlap_ratio']
-                        })
+                    # Create a new element for this displaced span
+                    all_blocks.append({
+                        'block_idx': len(all_blocks),
+                        'page_idx': span_info['page_idx'],
+                        'type': span_info['type'],
+                        'content': span_content,
+                        'bbox': span_info['bbox'],
+                        'score': 0.85,  # Slightly lower confidence for extracted spans
+                        'lines_deleted': False,
+                        'has_inline_equations': False,
+                        'original_index': None,
+                        'level': None,
+                        'additional_spans': [],
+                        'source': 'extracted_span'
+                    })
 
         logger.info(f"Collected {len(all_blocks)} blocks, {len(block_groups)} block groups, {len(inline_equations)} inline equations")
         
