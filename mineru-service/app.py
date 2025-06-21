@@ -489,7 +489,7 @@ class MinerUProcessor:
         for page_idx, page in enumerate(pdf_info):
             if not page.get('para_blocks'):
                 continue
-                
+
             for block_idx, block in enumerate(page['para_blocks']):
                 # Handle structured block groups (images/tables with nested blocks)
                 if block.get('type') in ['image', 'table']:
@@ -570,12 +570,13 @@ class MinerUProcessor:
                     
                     # Skip adding this to all_blocks since it's handled as a group
                     continue
-
+                        
                 # Handle regular blocks (text, title, etc.)
                 content = ""
                 has_lines_deleted = block.get('lines_deleted', False)
                 has_inline_equations = False
                 additional_content_spans = []  # Track spans that might be from other consolidated blocks
+                block_bbox = block.get('bbox', [0, 0, 0, 0])
 
                 # Process lines and spans for content extraction
                 if block.get('lines'):
@@ -592,32 +593,49 @@ class MinerUProcessor:
                                     })
                                     has_inline_equations = True
                                 elif span.get('content'):
-                                    content += span['content'] + " "
+                                    span_bbox = span.get('bbox', [0, 0, 0, 0])
+                                    span_content = span['content']
                                     
-                                    # Check if this span might be from a different logical block
-                                    # (based on significantly different bounding box from parent block)
-                                    if span.get('bbox') and block.get('bbox'):
-                                        span_bbox = span['bbox']
-                                        block_bbox = block['bbox']
+                                    # Calculate overlap between span and block bounding boxes
+                                    span_area = (span_bbox[2] - span_bbox[0]) * (span_bbox[3] - span_bbox[1])
+                                    if span_area <= 0:
+                                        # Fallback: if span has no area, use content anyway
+                                        content += span_content + " "
+                                        continue
+                                    
+                                    # Calculate intersection between span and block
+                                    x_left = max(block_bbox[0], span_bbox[0])
+                                    y_top = max(block_bbox[1], span_bbox[1])
+                                    x_right = min(block_bbox[2], span_bbox[2])
+                                    y_bottom = min(block_bbox[3], span_bbox[3])
+                                    
+                                    if x_left < x_right and y_top < y_bottom:
+                                        # There is intersection
+                                        intersection_area = (x_right - x_left) * (y_bottom - y_top)
+                                        overlap_ratio = intersection_area / span_area
                                         
-                                        # Calculate if span is significantly displaced from block
-                                        span_center_x = span_bbox[0] + (span_bbox[2] - span_bbox[0]) / 2
-                                        span_center_y = span_bbox[1] + (span_bbox[3] - span_bbox[1]) / 2
-                                        block_center_x = block_bbox[0] + (block_bbox[2] - block_bbox[0]) / 2
-                                        block_center_y = block_bbox[1] + (block_bbox[3] - block_bbox[1]) / 2
-                                        
-                                        x_distance = abs(span_center_x - block_center_x)
-                                        y_distance = abs(span_center_y - block_center_y)
-                                        
-                                        # If span is far from block center, it might be consolidated content
-                                        if x_distance > 100 or y_distance > 50:
+                                        if overlap_ratio > 0.5:  # More than 50% of span is within block
+                                            content += span_content + " "
+                                        else:
+                                            # This span is mostly outside the block - treat as displaced content
                                             additional_content_spans.append({
-                                                'content': span['content'],
-                                                'bbox': span['bbox'],
+                                                'content': span_content,
+                                                'bbox': span_bbox,
                                                 'type': span.get('type', 'text'),
                                                 'page_idx': page_idx,
-                                                'source_block_idx': len(all_blocks)
+                                                'source_block_idx': len(all_blocks),
+                                                'overlap_ratio': overlap_ratio
                                             })
+                                    else:
+                                        # No intersection - definitely displaced content
+                                        additional_content_spans.append({
+                                            'content': span_content,
+                                            'bbox': span_bbox,
+                                            'type': span.get('type', 'text'),
+                                            'page_idx': page_idx,
+                                            'source_block_idx': len(all_blocks),
+                                            'overlap_ratio': 0.0
+                                        })
 
                 # Store block metadata
                 all_blocks.append({
@@ -642,14 +660,16 @@ class MinerUProcessor:
                         'page_idx': page_idx
                     }
                 
-                # Process additional spans as separate elements if they're significantly displaced
+                # Process additional spans as separate elements if they have substantial content
                 for span_info in additional_content_spans:
-                    if len(span_info['content'].strip()) > 20:  # Only for substantial content
+                    span_content = span_info['content'].strip()
+                    if len(span_content) > 10:  # Lower threshold for meaningful content
+                        # Create a new element for this displaced span
                         all_blocks.append({
                             'block_idx': len(all_blocks),
                             'page_idx': span_info['page_idx'],
                             'type': span_info['type'],
-                            'content': span_info['content'].strip(),
+                            'content': span_content,
                             'bbox': span_info['bbox'],
                             'score': 0.85,  # Slightly lower confidence for extracted spans
                             'lines_deleted': False,
@@ -657,7 +677,8 @@ class MinerUProcessor:
                             'original_index': None,
                             'level': None,
                             'additional_spans': [],
-                            'source': 'extracted_span'
+                            'source': 'extracted_span',
+                            'overlap_ratio': span_info['overlap_ratio']
                         })
 
         logger.info(f"Collected {len(all_blocks)} blocks, {len(block_groups)} block groups, {len(inline_equations)} inline equations")
@@ -677,8 +698,8 @@ class MinerUProcessor:
                 content=eq['content'],
                 bbox=self._convert_bbox_array(eq['bbox']),
                 pageNumber=eq['pageNumber'],
-                hierarchy=None,
-                confidence=0.95,
+                            hierarchy=None,
+                            confidence=0.95,
                 metadata=ElementMetadata(
                     equationType="inline"
                 )
@@ -880,7 +901,7 @@ class MinerUProcessor:
                 
                 bbox = BoundingBox(
                     x=float(x1),
-                    y=float(y1),
+                    y=float(y1), 
                     width=float(x2 - x1),
                     height=float(y2 - y1)
                 )
