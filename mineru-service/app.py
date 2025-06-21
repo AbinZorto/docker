@@ -572,72 +572,81 @@ class MinerUProcessor:
                     continue
                         
                 # Handle regular blocks (text, title, etc.)
-                content = ""
                 has_lines_deleted = block.get('lines_deleted', False)
-                has_inline_equations = False
-                block_bbox = block.get('bbox', [0, 0, 0, 0])
-
-                # Process lines and spans for content extraction
-                if block.get('lines'):
-                    for line in block['lines']:
-                        if line.get('spans'):
-                            for span in line['spans']:
-                                if span.get('type') == 'inline_equation':
-                                    # Track inline equations but also preserve them in text content as placeholders
-                                    equation_content = span.get('content', '')
-                                    inline_equations.append({
-                                        'content': equation_content,
-                                        'bbox': span.get('bbox', [0, 0, 0, 0]),
-                                        'pageNumber': page_idx + 1,
-                                        'parent_block_idx': len(all_blocks)
-                                    })
-                                    has_inline_equations = True
-                                    
-                                    # Add a placeholder in the text content to preserve reading flow
-                                    # Convert LaTeX to a more readable form when possible
-                                    readable_form = equation_content
-                                    if 'F0.5' in equation_content or 'F_{0.5}' in equation_content:
-                                        readable_form = 'F₀.₅'
-                                    elif '\\beta' in equation_content:
-                                        readable_form = 'β'
-                                    elif '= 0.5' in equation_content:
-                                        readable_form = '= 0.5'
-                                    elif equation_content.startswith('\\'):
-                                        # Keep LaTeX for complex equations, but clean it up
-                                        readable_form = equation_content.replace('\\', '').replace('{', '').replace('}', '')
-                                    
-                                    content += readable_form + " "
-                                    
-                                elif span.get('content'):
-                                    span_content = span['content']
-                                    # Simply include all spans within the line - trust the nesting structure
-                                    content += span_content + " "
-
-                # Use the original MinerU type - no guessing or regex detection
-                final_content = content.strip()
-                block_type = block.get('type', 'text')  # Trust MinerU's type classification
                 
-                # Store block metadata
-                all_blocks.append({
-                    'block_idx': len(all_blocks),
-                    'page_idx': page_idx,
-                    'type': block_type,
-                    'content': final_content,
-                    'bbox': block.get('bbox', [0, 0, 0, 0]),
-                    'score': 0.95,
-                    'lines_deleted': has_lines_deleted,
-                    'has_inline_equations': has_inline_equations,
-                    'original_index': block.get('index'),
-                    'level': block.get('level')
-                })
-
-                # Handle content mapping for deleted blocks
-                if has_lines_deleted and final_content:
-                    content_mapping[len(all_blocks) - 1] = {
-                        'original_content': final_content,
+                # If block has lines_deleted=true but no actual lines, create a placeholder
+                if has_lines_deleted and not block.get('lines'):
+                    content_mapping[len(all_blocks)] = {
+                        'original_content': '',
                         'bbox': block.get('bbox', [0, 0, 0, 0]),
                         'page_idx': page_idx
                     }
+                    continue
+                
+                # Process each LINE as a separate element (this is the key fix!)
+                if block.get('lines'):
+                    for line_idx, line in enumerate(block['lines']):
+                        if not line.get('spans'):
+                            continue
+                            
+                        line_content = ""
+                        line_has_inline_equations = False
+                        line_bbox = line.get('bbox', block.get('bbox', [0, 0, 0, 0]))
+                        
+                        # Process spans within this line
+                        for span in line['spans']:
+                            if span.get('type') == 'inline_equation':
+                                # Track inline equations but also preserve them in text content as placeholders
+                                equation_content = span.get('content', '')
+                                inline_equations.append({
+                                    'content': equation_content,
+                                    'bbox': span.get('bbox', line_bbox),
+                                    'pageNumber': page_idx + 1,
+                                    'parent_block_idx': len(all_blocks)
+                                })
+                                line_has_inline_equations = True
+                                
+                                # Add a placeholder in the text content to preserve reading flow
+                                # Convert LaTeX to a more readable form when possible
+                                readable_form = equation_content
+                                if 'F0.5' in equation_content or 'F_{0.5}' in equation_content:
+                                    readable_form = 'F₀.₅'
+                                elif '\\beta' in equation_content:
+                                    readable_form = 'β'
+                                elif '= 0.5' in equation_content:
+                                    readable_form = '= 0.5'
+                                elif '5\\%' in equation_content:
+                                    readable_form = '5%'
+                                elif equation_content.startswith('\\'):
+                                    # Keep LaTeX for complex equations, but clean it up
+                                    readable_form = equation_content.replace('\\', '').replace('{', '').replace('}', '')
+                                
+                                line_content += readable_form + " "
+                                
+                            elif span.get('content'):
+                                span_content = span['content']
+                                # Simply include all spans within the line
+                                line_content += span_content + " "
+                        
+                        # Create element for this line if it has content
+                        final_line_content = line_content.strip()
+                        if final_line_content:
+                            line_block_type = block.get('type', 'text')  # Trust MinerU's type classification
+                            
+                            # Store line as individual block
+                            all_blocks.append({
+                                'block_idx': len(all_blocks),
+                                'page_idx': page_idx,
+                                'type': line_block_type,
+                                'content': final_line_content,
+                                'bbox': line_bbox,
+                                'score': 0.95,
+                                'lines_deleted': False,  # Individual lines aren't deleted
+                                'has_inline_equations': line_has_inline_equations,
+                                'original_index': block.get('index'),
+                                'level': block.get('level'),
+                                'line_idx': line_idx
+                            })
 
         logger.info(f"Collected {len(all_blocks)} blocks, {len(block_groups)} block groups, {len(inline_equations)} inline equations")
 
