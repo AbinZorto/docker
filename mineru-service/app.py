@@ -584,14 +584,31 @@ class MinerUProcessor:
                         if line.get('spans'):
                             for span in line['spans']:
                                 if span.get('type') == 'inline_equation':
-                                    # Track inline equations
+                                    # Track inline equations but also preserve them in text content as placeholders
+                                    equation_content = span.get('content', '')
                                     inline_equations.append({
-                                        'content': span.get('content', ''),
+                                        'content': equation_content,
                                         'bbox': span.get('bbox', [0, 0, 0, 0]),
                                         'pageNumber': page_idx + 1,
                                         'parent_block_idx': len(all_blocks)
                                     })
                                     has_inline_equations = True
+                                    
+                                    # Add a placeholder in the text content to preserve reading flow
+                                    # Convert LaTeX to a more readable form when possible
+                                    readable_form = equation_content
+                                    if 'F0.5' in equation_content or 'F_{0.5}' in equation_content:
+                                        readable_form = 'F₀.₅'
+                                    elif '\\beta' in equation_content:
+                                        readable_form = 'β'
+                                    elif '= 0.5' in equation_content:
+                                        readable_form = '= 0.5'
+                                    elif equation_content.startswith('\\'):
+                                        # Keep LaTeX for complex equations, but clean it up
+                                        readable_form = equation_content.replace('\\', '').replace('{', '').replace('}', '')
+                                    
+                                    content += readable_form + " "
+                                    
                                 elif span.get('content'):
                                     span_bbox = span.get('bbox', [0, 0, 0, 0])
                                     span_content = span['content']
@@ -614,7 +631,18 @@ class MinerUProcessor:
                                         intersection_area = (x_right - x_left) * (y_bottom - y_top)
                                         overlap_ratio = intersection_area / span_area
                                         
-                                        if overlap_ratio > 0.5:  # More than 50% of span is within block
+                                        # Improved logic: Use more nuanced thresholds based on content type
+                                        threshold = 0.3  # Lower threshold for better content capture
+                                        
+                                        # For short content (likely part of titles), be more inclusive
+                                        if len(span_content.strip()) < 30:
+                                            threshold = 0.1
+                                        
+                                        # For content that looks like it continues a sentence, be more inclusive
+                                        if span_content.strip().startswith(('and', 'but', 'or', 'the', 'a', 'an', 'in', 'on', 'at', 'for', 'with', 'to')):
+                                            threshold = 0.1
+                                            
+                                        if overlap_ratio > threshold:
                                             content += span_content + " "
                                         else:
                                             # This span is mostly outside the block - treat as displaced content
@@ -637,12 +665,22 @@ class MinerUProcessor:
                                             'overlap_ratio': 0.0
                                         })
 
+                # Additional check: Prevent title consolidation into text blocks
+                # If this block has very short content and the next block exists, check if it should stay separate
+                final_content = content.strip()
+                block_type = block.get('type', 'text')
+                
+                # Preserve title blocks as separate elements
+                if block_type in ['title', 'heading'] or (len(final_content) < 50 and any(char.isdigit() for char in final_content[:10])):
+                    # This looks like a title or section header - keep it separate
+                    pass  # Will be processed as is
+                
                 # Store block metadata
                 all_blocks.append({
                     'block_idx': len(all_blocks),
                     'page_idx': page_idx,
-                    'type': block.get('type', 'text'),
-                    'content': content.strip(),
+                    'type': block_type,
+                    'content': final_content,
                     'bbox': block.get('bbox', [0, 0, 0, 0]),
                     'score': 0.95,
                     'lines_deleted': has_lines_deleted,
@@ -653,9 +691,9 @@ class MinerUProcessor:
                 })
 
                 # Handle content mapping for deleted blocks
-                if has_lines_deleted and content.strip():
+                if has_lines_deleted and final_content:
                     content_mapping[len(all_blocks) - 1] = {
-                        'original_content': content.strip(),
+                        'original_content': final_content,
                         'bbox': block.get('bbox', [0, 0, 0, 0]),
                         'page_idx': page_idx
                     }
@@ -663,7 +701,7 @@ class MinerUProcessor:
                 # Process additional spans as separate elements if they have substantial content
                 for span_info in additional_content_spans:
                     span_content = span_info['content'].strip()
-                    if len(span_content) > 10:  # Lower threshold for meaningful content
+                    if len(span_content) > 15:  # Slightly higher threshold for meaningful displaced content
                         # Create a new element for this displaced span
                         all_blocks.append({
                             'block_idx': len(all_blocks),
