@@ -335,6 +335,7 @@ class MinerUProcessor:
         sections = []
         extracted_title = None
         extracted_abstract = None
+        image_files = {}  # Store image files as base64
         
         try:
             # Log all files in output directory for debugging
@@ -357,6 +358,28 @@ class MinerUProcessor:
             
             logger.info(f"Found {len(json_files)} JSON files, {len(middle_json_files)} middle files, {len(model_json_files)} model files, {len(content_list_files)} content_list files, and {len(md_files)} MD files")
             
+            # Collect image files if extract_images is enabled
+            if options.extract_images or options.extractImages:
+                image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp'}
+                for file_path in output_dir.rglob("*"):
+                    if file_path.is_file() and file_path.suffix.lower() in image_extensions:
+                        try:
+                            # Read image file as binary and base64 encode
+                            with open(file_path, 'rb') as f:
+                                image_content = f.read()
+                                image_base64 = base64.b64encode(image_content).decode()
+                                # Use filename as key for easy lookup
+                                image_files[file_path.name] = {
+                                    "content": image_base64,
+                                    "size": len(image_content),
+                                    "path": str(file_path.relative_to(output_dir))
+                                }
+                                logger.info(f"Collected image file: {file_path.name} ({len(image_content)} bytes)")
+                        except Exception as e:
+                            logger.warning(f"Failed to read image file {file_path}: {e}")
+                
+                logger.info(f"Collected {len(image_files)} image files")
+            
             # Parse middle.json output if available (preferred for structured data)
             if middle_json_files:
                 json_file = middle_json_files[0]  # Take first middle file
@@ -365,6 +388,9 @@ class MinerUProcessor:
                     content = await f.read()
                     data = json.loads(content)
                     elements = self._convert_mineru_middle_json_to_elements(data)
+                    
+                    # Replace image filenames with actual base64 data
+                    elements = self._populate_image_data(elements, image_files)
                     
                     # Enhance with model.json data if available
                     if model_json_files:
@@ -387,6 +413,7 @@ class MinerUProcessor:
                     content = await f.read()
                     data = json.loads(content)
                     elements = self._convert_mineru_content_list_to_elements(data)
+                    elements = self._populate_image_data(elements, image_files)
                     sections, extracted_title, extracted_abstract = self._extract_structured_content_from_elements(elements)
             # Fallback to other JSON files
             elif json_files:
@@ -396,6 +423,7 @@ class MinerUProcessor:
                     content = await f.read()
                     data = json.loads(content)
                     elements = self._convert_mineru_json_to_elements(data)
+                    elements = self._populate_image_data(elements, image_files)
                     sections, extracted_title, extracted_abstract = self._extract_structured_content_from_elements(elements)
             
             # Parse Markdown output if available and try to extract title/abstract from it
@@ -1343,6 +1371,21 @@ class MinerUProcessor:
                 elements.append(element)
         
         logger.info(f"Converted {len(elements)} elements from MinerU content_list")
+        return elements
+
+    def _populate_image_data(self, elements: List[MinerUElement], image_files: dict) -> List[MinerUElement]:
+        """Replace image filenames in elements with actual base64 data"""
+        for element in elements:
+            if element.metadata and element.metadata.imageData:
+                # Check if imageData is a filename that we have the actual file for
+                filename = element.metadata.imageData
+                if filename in image_files:
+                    # Replace filename with actual base64 content
+                    element.metadata.imageData = image_files[filename]["content"]
+                    logger.info(f"Populated base64 data for image: {filename} ({image_files[filename]['size']} bytes)")
+                else:
+                    logger.warning(f"Image file not found for element: {filename}")
+        
         return elements
 
     def _get_element_type_counts(self, elements):
