@@ -1374,17 +1374,36 @@ class MinerUProcessor:
         return elements
 
     def _populate_image_data(self, elements: List[MinerUElement], image_files: dict) -> List[MinerUElement]:
-        """Replace image filenames in elements with actual base64 data"""
+        """Replace image filenames in elements with actual base64 data - keeping base64 ONLY in metadata"""
         for element in elements:
-            if element.metadata and element.metadata.imageData:
-                # Check if imageData is a filename that we have the actual file for
-                filename = element.metadata.imageData
-                if filename in image_files:
-                    # Replace filename with actual base64 content
+            # Check if this is an image element that needs base64 data
+            if element.type == "image":
+                # First check metadata.imageData
+                if element.metadata and element.metadata.imageData:
+                    filename = element.metadata.imageData
+                    if filename in image_files:
+                        # Replace filename with actual base64 content in metadata only
+                        element.metadata.imageData = image_files[filename]["content"]
+                        logger.info(f"Populated base64 data in metadata for image: {filename} ({image_files[filename]['size']} bytes)")
+                        
+                        # IMPORTANT: Keep content as filename, not base64
+                        # The client-side R2 processing will handle the base64 extraction
+                        # This prevents huge base64 strings from being stored in the content field
+                        if element.content == filename:
+                            element.content = filename  # Keep as filename for now
+                    else:
+                        logger.warning(f"Image file not found for element: {filename}")
+                
+                # Also check if content field contains a filename we can populate
+                elif element.content and element.content in image_files:
+                    filename = element.content
+                    # Set base64 in metadata, keep filename in content
+                    if not element.metadata:
+                        element.metadata = ElementMetadata()
                     element.metadata.imageData = image_files[filename]["content"]
-                    logger.info(f"Populated base64 data for image: {filename} ({image_files[filename]['size']} bytes)")
-                else:
-                    logger.warning(f"Image file not found for element: {filename}")
+                    logger.info(f"Populated base64 data from content filename: {filename} ({image_files[filename]['size']} bytes)")
+                    # Keep content as filename
+                    element.content = filename
         
         return elements
 
