@@ -236,42 +236,78 @@ def parse_token_usage_from_logs(stdout: str, stderr: str, model_name: str = None
     token_usage = TokenUsage()
     
     # Combine stdout and stderr for searching
-    combined_logs = (stdout + "\n" + stderr).lower()
+    combined_logs = stdout + "\n" + stderr
     
-    # Common patterns for token usage in logs
+    logger.debug(f"🔍 Searching for token usage in {len(combined_logs)} characters of logs")
+    logger.debug(f"🔍 Combined logs sample (first 500 chars): {combined_logs[:500]}")
+    
+    # More comprehensive patterns for token usage in logs
     patterns = [
         # SGLang format: "prompt_tokens": 1234, "completion_tokens": 567
-        r'"prompt_tokens":\s*(\d+).*?"completion_tokens":\s*(\d+)',
-        r"'prompt_tokens':\s*(\d+).*?'completion_tokens':\s*(\d+)",
+        (r'"prompt_tokens":\s*(\d+).*?"completion_tokens":\s*(\d+)', "SGLang JSON format"),
+        (r"'prompt_tokens':\s*(\d+).*?'completion_tokens':\s*(\d+)", "SGLang Python dict format"),
         
-        # Alternative formats
-        r'input_tokens[:\s]+(\d+).*?output_tokens[:\s]+(\d+)',
-        r'tokens_input[:\s]+(\d+).*?tokens_output[:\s]+(\d+)',
-        r'prompt:\s*(\d+)\s*tokens.*?completion:\s*(\d+)\s*tokens',
+        # OpenAI-style usage reporting
+        (r'usage.*?"prompt_tokens":\s*(\d+).*?"completion_tokens":\s*(\d+)', "OpenAI usage format"),
+        (r'"usage".*?"prompt_tokens":\s*(\d+).*?"completion_tokens":\s*(\d+)', "OpenAI nested usage format"),
         
-        # Usage summary format
-        r'usage.*?prompt_tokens[:\s]+(\d+).*?completion_tokens[:\s]+(\d+)',
+        # Alternative token reporting formats
+        (r'input_tokens[:\s=]+(\d+).*?output_tokens[:\s=]+(\d+)', "Input/output tokens format"),
+        (r'tokens_input[:\s=]+(\d+).*?tokens_output[:\s=]+(\d+)', "Tokens input/output format"),
+        (r'prompt:\s*(\d+)\s*tokens.*?completion:\s*(\d+)\s*tokens', "Descriptive tokens format"),
+        (r'(\d+)\s*prompt\s*tokens.*?(\d+)\s*completion\s*tokens', "Tokens with description"),
+        
+        # SGLang client specific patterns
+        (r'total_prompt_tokens[:\s=]+(\d+).*?total_completion_tokens[:\s=]+(\d+)', "SGLang total tokens"),
+        (r'request.*?prompt_tokens[:\s=]+(\d+).*?completion_tokens[:\s=]+(\d+)', "SGLang request format"),
+        
+        # Generic usage patterns
+        (r'tokens.*?prompt[:\s=]+(\d+).*?completion[:\s=]+(\d+)', "Generic tokens format"),
+        (r'usage.*?input[:\s=]+(\d+).*?output[:\s=]+(\d+)', "Generic usage format"),
     ]
     
     import re
-    for pattern in patterns:
+    for pattern, description in patterns:
+        # Try case-insensitive search
         match = re.search(pattern, combined_logs, re.IGNORECASE | re.DOTALL)
         if match:
-            prompt_tokens = int(match.group(1))
-            completion_tokens = int(match.group(2))
-            
-            token_usage.prompt_tokens = prompt_tokens
-            token_usage.completion_tokens = completion_tokens
-            token_usage.total_tokens = prompt_tokens + completion_tokens
-            token_usage.model_name = model_name
-            token_usage.cost_estimate_usd = estimate_token_cost(prompt_tokens, completion_tokens, model_name)
-            
-            logger.info(f"🔢 Token usage parsed: {prompt_tokens} prompt + {completion_tokens} completion = {token_usage.total_tokens} total tokens")
-            logger.info(f"💰 Estimated cost: ${token_usage.cost_estimate_usd:.6f} USD")
-            
-            return token_usage
+            try:
+                prompt_tokens = int(match.group(1))
+                completion_tokens = int(match.group(2))
+                
+                token_usage.prompt_tokens = prompt_tokens
+                token_usage.completion_tokens = completion_tokens
+                token_usage.total_tokens = prompt_tokens + completion_tokens
+                token_usage.model_name = model_name
+                token_usage.cost_estimate_usd = estimate_token_cost(prompt_tokens, completion_tokens, model_name)
+                
+                logger.info(f"🔢 Token usage parsed using {description}: {prompt_tokens} prompt + {completion_tokens} completion = {token_usage.total_tokens} total tokens")
+                logger.info(f"💰 Estimated cost: ${token_usage.cost_estimate_usd:.6f} USD")
+                logger.info(f"🎯 Matched text: {match.group(0)}")
+                
+                return token_usage
+            except (ValueError, IndexError) as e:
+                logger.warning(f"⚠️  Failed to parse token numbers from match: {e}")
+                continue
     
-    logger.debug("No token usage information found in logs")
+    # If no patterns matched, let's look for any number patterns to debug
+    number_patterns = re.findall(r'\d+', combined_logs)
+    if number_patterns:
+        logger.debug(f"🔍 Found numbers in logs: {number_patterns[:20]}...")  # Show first 20 numbers
+    
+    # Look for common token-related keywords
+    token_keywords = ['token', 'usage', 'prompt', 'completion', 'input', 'output']
+    found_keywords = []
+    for keyword in token_keywords:
+        if keyword.lower() in combined_logs.lower():
+            found_keywords.append(keyword)
+    
+    if found_keywords:
+        logger.debug(f"🔍 Found token-related keywords: {found_keywords}")
+    else:
+        logger.debug("🔍 No token-related keywords found in logs")
+    
+    logger.warning("❌ No token usage information found in logs using any known pattern")
     return None
 
 # MinerU Processor using official command-line interface
@@ -286,33 +322,72 @@ class MinerUProcessor:
         
         combined_logs = stdout + "\n" + stderr
         
-        # Common model name patterns in logs
+        logger.debug(f"🔍 Attempting to detect model name from {len(combined_logs)} chars of logs")
+        
+        # Common model name patterns in logs (more comprehensive for SGLang)
         model_patterns = [
-            r'model[_\s]*name[:\s]*["\']?([^"\'\s,}]+)',
-            r'using[_\s]*model[:\s]*["\']?([^"\'\s,}]+)',
-            r'loaded[_\s]*model[:\s]*["\']?([^"\'\s,}]+)',
-            r'model[:\s]*["\']?([^"\'\s,}]+)["\']?',
-            r'checkpoint[:\s]*["\']?([^"\'\s,}]+)',
+            # Direct model name mentions
+            (r'model[_\s]*name[:\s]*["\']?([^"\'\s,}]+)', "model_name pattern"),
+            (r'using[_\s]*model[:\s]*["\']?([^"\'\s,}]+)', "using_model pattern"),
+            (r'loaded[_\s]*model[:\s]*["\']?([^"\'\s,}]+)', "loaded_model pattern"),
+            (r'model[:\s]*["\']?([^"\'\s,}]+)["\']?', "generic model pattern"),
+            (r'checkpoint[:\s]*["\']?([^"\'\s,}]+)', "checkpoint pattern"),
+            
+            # SGLang specific patterns
+            (r'sglang.*?model[:\s]*["\']?([^"\'\s,}]+)', "sglang model pattern"),
+            (r'model.*?sglang[:\s]*["\']?([^"\'\s,}]+)', "model sglang pattern"),
+            (r'vlm.*?model[:\s]*["\']?([^"\'\s,}]+)', "vlm model pattern"),
+            
+            # HuggingFace model patterns
+            (r'([a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+)', "huggingface repo pattern"),
+            (r'(llama[0-9.-]+[a-zA-Z]*)', "llama version pattern"),
+            (r'(qwen[0-9.-]+[a-zA-Z]*)', "qwen version pattern"),
+            (r'(mistral[0-9.-]+[a-zA-Z]*)', "mistral version pattern"),
+            (r'(phi[0-9.-]+[a-zA-Z]*)', "phi version pattern"),
         ]
         
-        for pattern in model_patterns:
+        for pattern, description in model_patterns:
             matches = re.findall(pattern, combined_logs, re.IGNORECASE)
             for match in matches:
-                # Filter out common non-model words
-                if match and len(match) > 3 and not any(skip in match.lower() for skip in 
-                    ['json', 'config', 'true', 'false', 'none', 'null', 'error', 'warning']):
-                    logger.info(f"🤖 Detected model name: {match}")
+                # Clean up the match
+                match = match.strip()
+                
+                # Filter out common non-model words and patterns
+                skip_patterns = [
+                    'json', 'config', 'true', 'false', 'none', 'null', 'error', 'warning',
+                    'output', 'input', 'file', 'path', 'dir', 'tmp', 'temp',
+                    'http', 'https', 'www', '.com', '.org'
+                ]
+                
+                if (match and len(match) > 3 and 
+                    not any(skip in match.lower() for skip in skip_patterns) and
+                    not match.isdigit() and  # Not just a number
+                    '/' not in match or len(match.split('/')) == 2):  # Valid repo format or no slash
+                    
+                    logger.info(f"🤖 Detected model name using {description}: {match}")
                     return match
         
-        # Fallback: try to infer from backend
-        if 'gpt' in options.backend.lower():
-            return 'gpt-4'
-        elif 'claude' in options.backend.lower():
-            return 'claude-3'
-        elif 'llama' in options.backend.lower():
+        # Fallback: try to infer from backend and look for model hints in logs
+        backend_model_map = {
+            'gpt': 'gpt-4',
+            'claude': 'claude-3',
+            'llama': 'llama',
+            'qwen': 'qwen',
+            'mistral': 'mistral',
+            'phi': 'phi'
+        }
+        
+        for keyword, model in backend_model_map.items():
+            if keyword in options.backend.lower() or keyword in combined_logs.lower():
+                logger.info(f"🤖 Inferred model name from backend/logs: {model}")
+                return model
+        
+        # Default fallback for SGLang
+        if 'sglang' in options.backend.lower():
+            logger.info("🤖 Using default SGLang model: llama")
             return 'llama'
         
-        logger.debug("Could not detect model name from logs")
+        logger.debug("❓ Could not detect model name from logs or backend")
         return None
         
     def _build_mineru_command(self, input_path: str, output_dir: str, options: ProcessingOptions) -> List[str]:
@@ -406,11 +481,23 @@ class MinerUProcessor:
             stdout_str = stdout.decode() if stdout else ""
             stderr_str = stderr.decode() if stderr else ""
             
-            # Log stdout and stderr for debugging
+            # Log stdout and stderr for debugging with lengths
+            logger.info(f"🔍 MinerU process completed with return code: {process.returncode}")
+            logger.info(f"📝 stdout length: {len(stdout_str)} chars, stderr length: {len(stderr_str)} chars")
+            
             if stdout_str:
-                logger.info(f"MinerU stdout: {stdout_str}")
+                logger.info(f"📤 MinerU stdout (first 1000 chars): {stdout_str[:1000]}")
+                if len(stdout_str) > 1000:
+                    logger.info(f"📤 MinerU stdout (last 500 chars): ...{stdout_str[-500:]}")
+            else:
+                logger.warning("⚠️  MinerU stdout is empty")
+                
             if stderr_str:
-                logger.warning(f"MinerU stderr: {stderr_str}")
+                logger.info(f"📥 MinerU stderr (first 1000 chars): {stderr_str[:1000]}")
+                if len(stderr_str) > 1000:
+                    logger.info(f"📥 MinerU stderr (last 500 chars): ...{stderr_str[-500:]}")
+            else:
+                logger.info("ℹ️  MinerU stderr is empty")
             
             if process.returncode != 0:
                 error_msg = stderr_str if stderr_str else "Unknown error"
@@ -419,9 +506,15 @@ class MinerUProcessor:
             
             # Try to detect model name from logs for better cost estimation
             detected_model = self._detect_model_name(stdout_str, stderr_str, options)
+            logger.info(f"🤖 Detected model: {detected_model}")
             
-            # Parse token usage from logs
+            # Parse token usage from logs with detailed debugging
+            logger.info("🔢 Attempting to parse token usage from logs...")
             token_usage = parse_token_usage_from_logs(stdout_str, stderr_str, model_name=detected_model)
+            if token_usage:
+                logger.info(f"✅ Token usage found: {token_usage.prompt_tokens} + {token_usage.completion_tokens} = {token_usage.total_tokens} tokens")
+            else:
+                logger.warning("❌ No token usage found in logs")
             
             # Parse MinerU output
             result = await self._parse_mineru_output(output_dir, options)
