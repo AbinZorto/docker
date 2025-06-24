@@ -35,11 +35,6 @@ COPY requirements.txt /app/requirements.txt
 # Install Python dependencies with system packages override
 RUN pip3 install --break-system-packages -r requirements.txt
 
-# Pre-download MinerU models to reduce startup time (optional but recommended)
-# This downloads the 9B model that SGLang uses
-RUN echo "🔽 Pre-downloading MinerU models to avoid startup delays..." && \
-    python3 -c "import os; from huggingface_hub import hf_hub_download; import logging; logging.basicConfig(level=logging.INFO); model_repo = 'opendatalab/MinerU2.0-2505-0.9B'; files_to_download = ['config.json', 'generation_config.json', 'model.safetensors.index.json', 'tokenizer.json', 'tokenizer_config.json']; [hf_hub_download(repo_id=model_repo, filename=f, cache_dir='/root/.cache/huggingface') for f in files_to_download]; print('✅ Model pre-download completed')" || echo "Model pre-download failed, will download on startup"
-
 # Copy application files
 COPY . /app/
 
