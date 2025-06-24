@@ -365,9 +365,12 @@ class MinerUProcessor:
         self.temp_dir.mkdir(exist_ok=True)
     
     async def _capture_sglang_logs(self, sglang_url: str) -> str:
-        """Capture logs from SGLang server running in same container"""
+        """Capture logs from SGLang server running in same container - now includes system logs"""
         try:
             import aiohttp
+            import subprocess
+            import os
+            import asyncio
             
             # Use internal container address - override if using external URL  
             if sglang_url.startswith("http://127.0.0.1:8001") or sglang_url.startswith("http://localhost:8001"):
@@ -377,7 +380,48 @@ class MinerUProcessor:
                 base_url = "http://127.0.0.1:8001"
                 logger.info(f"🔄 Using internal SGLang URL: {base_url} instead of {sglang_url}")
             
-            # Give SGLang server time to start if this is early in container lifecycle
+            all_logs = []
+            
+            # First, capture system/process logs that might contain token usage
+            logger.info("🔍 CAPTURING SYSTEM LOGS FOR SGLANG...")
+            try:
+                # Try to find SGLang process and its logs
+                system_commands = [
+                    "ps aux | grep -E '(sglang|python.*sglang)' | grep -v grep",
+                    "pgrep -fl sglang",
+                    "find /tmp -name '*sglang*' -type f -exec ls -la {} \\; 2>/dev/null",
+                    "find /app -name '*sglang*' -type f -exec ls -la {} \\; 2>/dev/null", 
+                    "find /var/log -name '*sglang*' -type f -exec ls -la {} \\; 2>/dev/null",
+                    "ls -la /tmp/ | grep sglang",
+                    "ls -la /app/ | grep sglang",
+                    # Check for Python processes that might be SGLang
+                    "ps aux | grep python | grep -v grep",
+                    # Try to get recent logs from journalctl or syslog
+                    "journalctl --no-pager -n 100 --since '10 minutes ago' 2>/dev/null | grep -i sglang || echo 'No journalctl sglang logs'",
+                    "tail -100 /var/log/syslog 2>/dev/null | grep -i sglang || echo 'No syslog sglang logs'",
+                    # Check container logs if available
+                    "dmesg | tail -50 | grep -i sglang || echo 'No dmesg sglang logs'",
+                ]
+                
+                for cmd in system_commands:
+                    try:
+                        logger.info(f"🔧 Running: {cmd}")
+                        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+                        if result.stdout.strip():
+                            all_logs.append(f"=== SYSTEM CMD: {cmd} ===\n{result.stdout}\n")
+                            logger.info(f"📋 System command output: {result.stdout[:200]}...")
+                        if result.stderr.strip():
+                            all_logs.append(f"=== SYSTEM STDERR: {cmd} ===\n{result.stderr}\n")
+                    except subprocess.TimeoutExpired:
+                        logger.warning(f"⏰ System command timed out: {cmd}")
+                    except Exception as e:
+                        logger.debug(f"Failed system command {cmd}: {e}")
+                        
+            except Exception as e:
+                logger.warning(f"Failed to capture system logs: {e}")
+            
+            # Then capture API endpoints  
+            logger.info("🔍 CAPTURING API ENDPOINT DATA...")
             max_retries = 3
             for retry in range(max_retries):
                 try:
@@ -393,7 +437,6 @@ class MinerUProcessor:
                             f"{base_url}/v1/models",            # ✅ Available - OpenAI-compatible models endpoint
                         ]
                         
-                        all_logs = []
                         successful_endpoints = 0
                         
                         for endpoint in endpoints_to_try:
@@ -401,7 +444,7 @@ class MinerUProcessor:
                                 async with session.get(endpoint, timeout=10) as response:
                                     if response.status == 200:
                                         data = await response.text()
-                                        all_logs.append(f"=== {endpoint} ===\n{data}\n")
+                                        all_logs.append(f"=== API ENDPOINT: {endpoint} ===\n{data}\n")
                                         successful_endpoints += 1
                                         logger.info(f"📋 Captured {len(data)} characters from {endpoint}")
                                         
@@ -422,9 +465,9 @@ class MinerUProcessor:
                             except Exception as e:
                                 logger.debug(f"Could not get logs from {endpoint}: {e}")
                         
-                        if successful_endpoints > 0:
+                        if successful_endpoints > 0 or all_logs:  # Accept if we have system logs even if endpoints fail
                             combined_logs = "\n".join(all_logs)
-                            logger.info(f"📋 Total SGLang logs captured: {len(combined_logs)} characters from {successful_endpoints}/{len(endpoints_to_try)} endpoints")
+                            logger.info(f"📋 Total SGLang logs captured: {len(combined_logs)} characters from {successful_endpoints}/{len(endpoints_to_try)} endpoints + system logs")
                             return combined_logs
                         else:
                             if retry < max_retries - 1:
@@ -433,7 +476,7 @@ class MinerUProcessor:
                                 continue
                             else:
                                 logger.warning(f"No SGLang endpoints responded after {max_retries} attempts")
-                                return ""
+                                return "\n".join(all_logs) if all_logs else ""
                                 
                 except aiohttp.ClientError as e:
                     if retry < max_retries - 1:
@@ -441,7 +484,8 @@ class MinerUProcessor:
                         await asyncio.sleep(2)
                         continue
                     else:
-                        raise e
+                        logger.warning(f"SGLang connection failed permanently: {e}")
+                        return "\n".join(all_logs) if all_logs else ""
                         
         except Exception as e:
             logger.warning(f"Failed to capture SGLang server logs: {e}")
@@ -647,35 +691,32 @@ class MinerUProcessor:
             detected_model = self._detect_model_name(stdout_str, stderr_str, options)
             logger.info(f"🤖 Detected model: {detected_model}")
             
-            # Parse token usage - prioritize SGLang server logs, fallback to stdout/stderr
-            logger.info("🔢 Attempting to parse token usage from logs...")
-            token_usage = None
+            # DEBUG: Just capture and display SGLang server logs for now
+            logger.info("📋 DEBUGGING: Capturing SGLang server logs...")
+            token_usage = None  # Skip token usage parsing for now
             
             if options.backend == "vlm-sglang-client":
-                # Capture fresh SGLang server logs after processing to get token usage
-                logger.info("🚀 Capturing fresh SGLang server logs post-processing...")
+                logger.info("🚀 FRESH SGLang Server Logs (POST-PROCESSING):")
+                logger.info("=" * 100)
                 post_processing_logs = await self._capture_sglang_logs(options.sglang_url)
-                
                 if post_processing_logs:
-                    logger.info("🔍 Parsing token usage from post-processing SGLang server logs...")
-                    token_usage = parse_token_usage_from_logs(post_processing_logs, "", model_name=detected_model)
-                    if token_usage:
-                        logger.info(f"✅ Token usage found in SGLang post-processing logs: {token_usage.prompt_tokens} + {token_usage.completion_tokens} = {token_usage.total_tokens} tokens")
-                
-                # Fallback to pre-processing logs if no token usage found
-                if not token_usage and sglang_logs:
-                    logger.info("🔄 Fallback: Parsing token usage from pre-processing SGLang server logs...")
-                    token_usage = parse_token_usage_from_logs(sglang_logs, "", model_name=detected_model)
-                    if token_usage:
-                        logger.info(f"✅ Token usage found in SGLang pre-processing logs: {token_usage.prompt_tokens} + {token_usage.completion_tokens} = {token_usage.total_tokens} tokens")
-            
-            if not token_usage:
-                logger.info("🔄 Final fallback: Parsing token usage from MinerU stdout/stderr...")
-                token_usage = parse_token_usage_from_logs(stdout_str, stderr_str, model_name=detected_model)
-                if token_usage:
-                    logger.info(f"✅ Token usage found in MinerU logs: {token_usage.prompt_tokens} + {token_usage.completion_tokens} = {token_usage.total_tokens} tokens")
+                    # Split long logs and show them clearly
+                    for i, chunk in enumerate([post_processing_logs[i:i+2000] for i in range(0, len(post_processing_logs), 2000)]):
+                        logger.info(f"[CHUNK {i+1}] {chunk}")
                 else:
-                    logger.warning("❌ No token usage found in any logs")
+                    logger.info("❌ NO FRESH SGLANG LOGS CAPTURED")
+                logger.info("=" * 100)
+                
+                if sglang_logs:
+                    logger.info("🔄 PRE-PROCESSING SGLang Server Logs:")
+                    logger.info("=" * 100)
+                    for i, chunk in enumerate([sglang_logs[i:i+2000] for i in range(0, len(sglang_logs), 2000)]):
+                        logger.info(f"[PRE-CHUNK {i+1}] {chunk}")
+                    logger.info("=" * 100)
+                else:
+                    logger.info("❌ NO PRE-PROCESSING SGLANG LOGS")
+            
+            logger.info("⏸️  Token usage parsing DISABLED for debugging - focusing on log capture only")
             
             # Parse MinerU output
             result = await self._parse_mineru_output(output_dir, options)
