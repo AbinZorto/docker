@@ -278,6 +278,50 @@ def parse_token_usage_from_logs(stdout: str, stderr: str, model_name: str = None
     logger.debug(f"🔍 Searching for token usage in {len(combined_logs)} characters of logs")
     logger.debug(f"🔍 Combined logs sample (first 500 chars): {combined_logs[:500]}")
     
+    import re
+    
+    # 🎯 NEW: Parse SGLang-specific batch processing patterns
+    # Based on the actual SGLang logs: "Prefill batch. #new-seq: 1, #new-token: 4096, #cached-token: 0"
+    # and "Decode batch. #running-req: 10, #token: 73827, token usage: 0.05"
+    
+    # Extract all prefill batch tokens (input tokens)
+    prefill_tokens = []
+    prefill_pattern = r'Prefill batch.*?#new-token:\s*(\d+)'
+    prefill_matches = re.findall(prefill_pattern, combined_logs, re.IGNORECASE)
+    
+    if prefill_matches:
+        prefill_tokens = [int(token) for token in prefill_matches]
+        total_input_tokens = sum(prefill_tokens)
+        logger.info(f"🔢 Found {len(prefill_tokens)} prefill batches with tokens: {prefill_tokens}")
+        logger.info(f"📊 Total input tokens from prefill batches: {total_input_tokens}")
+        
+        # Extract decode batch information to estimate output tokens
+        decode_pattern = r'Decode batch.*?#token:\s*(\d+)'
+        decode_matches = re.findall(decode_pattern, combined_logs, re.IGNORECASE)
+        
+        if decode_matches:
+            # The #token in decode batches represents total tokens processed
+            # Output tokens = final total tokens - input tokens (approximately)
+            decode_tokens = [int(token) for token in decode_matches]
+            max_total_tokens = max(decode_tokens) if decode_tokens else 0
+            
+            # Estimate output tokens (this is approximate)
+            estimated_output_tokens = max(0, max_total_tokens - total_input_tokens)
+            
+            logger.info(f"🔢 Found {len(decode_tokens)} decode batches, max total tokens: {max_total_tokens}")
+            logger.info(f"📊 Estimated output tokens: {estimated_output_tokens}")
+            
+            token_usage.prompt_tokens = total_input_tokens
+            token_usage.completion_tokens = estimated_output_tokens
+            token_usage.total_tokens = total_input_tokens + estimated_output_tokens
+            token_usage.model_name = model_name
+            token_usage.cost_estimate_usd = estimate_token_cost(total_input_tokens, estimated_output_tokens, model_name)
+            
+            logger.info(f"🎯 SGLang batch parsing: {total_input_tokens} input + {estimated_output_tokens} output = {token_usage.total_tokens} total tokens")
+            logger.info(f"💰 Estimated cost: ${token_usage.cost_estimate_usd:.6f} USD")
+            
+            return token_usage
+    
     # Enhanced patterns based on actual SGLang server structure and OpenAI compatibility
     patterns = [
         # SGLang server API response patterns (most likely to contain token usage)
@@ -314,7 +358,6 @@ def parse_token_usage_from_logs(stdout: str, stderr: str, model_name: str = None
         (r'usage.*?input[:\s=]+(\d+).*?output[:\s=]+(\d+)', "Generic usage format"),
     ]
     
-    import re
     for pattern, description in patterns:
         # Try case-insensitive search
         match = re.search(pattern, combined_logs, re.IGNORECASE | re.DOTALL)
@@ -344,7 +387,7 @@ def parse_token_usage_from_logs(stdout: str, stderr: str, model_name: str = None
         logger.debug(f"🔍 Found numbers in logs: {number_patterns[:20]}...")  # Show first 20 numbers
     
     # Look for common token-related keywords
-    token_keywords = ['token', 'usage', 'prompt', 'completion', 'input', 'output']
+    token_keywords = ['token', 'usage', 'prompt', 'completion', 'input', 'output', 'prefill', 'decode', 'batch']
     found_keywords = []
     for keyword in token_keywords:
         if keyword.lower() in combined_logs.lower():
@@ -771,7 +814,25 @@ class MinerUProcessor:
                 else:
                     logger.info("❌ NO PRE-PROCESSING SGLANG LOGS")
             
-            logger.info("⏸️  Token usage parsing DISABLED for debugging - focusing on log capture only")
+            # 🧮 Parse token usage from all available logs
+            logger.info("🧮 Parsing token usage from logs...")
+            token_usage = parse_token_usage_from_logs(stdout, stderr, model_name)
+            
+            # Also try to parse token usage from captured SGLang logs
+            if sglang_logs:
+                logger.info(f"🔍 Attempting to parse token usage from {len(sglang_logs)} characters of SGLang logs")
+                sglang_token_usage = parse_token_usage_from_logs("", sglang_logs, model_name)
+                
+                # If we found token usage in SGLang logs but not in stdout/stderr, use SGLang data
+                if sglang_token_usage and not token_usage:
+                    token_usage = sglang_token_usage
+                    logger.info("✅ Using token usage data from SGLang server logs")
+                elif sglang_token_usage and token_usage:
+                    # Merge or prefer the more complete data
+                    logger.info("🔄 Found token usage in both sources, using combined data")
+                    token_usage.prompt_tokens = max(token_usage.prompt_tokens, sglang_token_usage.prompt_tokens)
+                    token_usage.completion_tokens = max(token_usage.completion_tokens, sglang_token_usage.completion_tokens)
+                    token_usage.total_tokens = token_usage.prompt_tokens + token_usage.completion_tokens
             
             # Parse MinerU output
             result = await self._parse_mineru_output(output_dir, options)
