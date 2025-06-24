@@ -202,12 +202,11 @@ async def check_sglang_server(url: str) -> bool:
             check_url = "http://127.0.0.1:8001"
             
         async with aiohttp.ClientSession() as session:
-            # Try multiple endpoints to check if SGLang is responsive
+            # Use confirmed SGLang endpoints from OpenAPI spec
             endpoints_to_check = [
-                f"{check_url}/get_server_info",
-                f"{check_url}/health", 
-                f"{check_url}/v1/models",
-                f"{check_url}/"
+                f"{check_url}/get_server_info",  # ✅ Confirmed working
+                f"{check_url}/get_model_info",   # ✅ Available
+                f"{check_url}/v1/models",        # ✅ Available
             ]
             
             for endpoint in endpoints_to_check:
@@ -227,9 +226,8 @@ async def check_sglang_server(url: str) -> bool:
             import requests
             check_url = "http://127.0.0.1:8001"
             endpoints_to_check = [
-                f"{check_url}/get_server_info",
-                f"{check_url}/health", 
-                f"{check_url}/"
+                f"{check_url}/get_server_info",  # ✅ Confirmed working
+                f"{check_url}/get_model_info",   # ✅ Available
             ]
             
             for endpoint in endpoints_to_check:
@@ -280,13 +278,17 @@ def parse_token_usage_from_logs(stdout: str, stderr: str, model_name: str = None
     logger.debug(f"🔍 Searching for token usage in {len(combined_logs)} characters of logs")
     logger.debug(f"🔍 Combined logs sample (first 500 chars): {combined_logs[:500]}")
     
-    # More comprehensive patterns for token usage in logs - prioritize SGLang patterns
+    # Enhanced patterns based on actual SGLang server structure and OpenAI compatibility
     patterns = [
         # SGLang server API response patterns (most likely to contain token usage)
         (r'"prompt_tokens":\s*(\d+).*?"completion_tokens":\s*(\d+)', "SGLang JSON format"),
         (r"'prompt_tokens':\s*(\d+).*?'completion_tokens':\s*(\d+)", "SGLang Python dict format"),
         (r'"input_tokens":\s*(\d+).*?"output_tokens":\s*(\d+)', "SGLang input/output JSON format"),
         (r'"total_prompt_tokens":\s*(\d+).*?"total_completion_tokens":\s*(\d+)', "SGLang total tokens JSON"),
+        
+        # SGLang load/stats patterns (from /get_load endpoint)
+        (r'"num_requests_running":\s*\d+.*?"prompt_tokens":\s*(\d+).*?"completion_tokens":\s*(\d+)', "SGLang load stats"),
+        (r'"running_requests".*?"prompt_tokens":\s*(\d+).*?"completion_tokens":\s*(\d+)', "SGLang running requests"),
         
         # SGLang server info/stats patterns
         (r'prompt_tokens["\']?\s*:\s*(\d+).*?completion_tokens["\']?\s*:\s*(\d+)', "SGLang server stats format"),
@@ -382,15 +384,13 @@ class MinerUProcessor:
                     async with aiohttp.ClientSession(
                         timeout=aiohttp.ClientTimeout(total=15, connect=5)
                     ) as session:
-                        # Try to get server info and recent logs - prioritize token-rich endpoints
+                        # Use only confirmed SGLang endpoints from OpenAPI spec
                         endpoints_to_try = [
-                            f"{base_url}/get_server_info",      # Usually contains server stats
-                            f"{base_url}/stats",                # May contain usage stats  
-                            f"{base_url}/get_model_info",       # Model information
-                            f"{base_url}/metrics",              # Prometheus-style metrics
-                            f"{base_url}/v1/models",            # OpenAI-compatible models endpoint
-                            f"{base_url}/health",               # Basic health check
-                            f"{base_url}/",                     # Root endpoint (may show stats)
+                            f"{base_url}/get_server_info",      # ✅ Confirmed - detailed server stats and load info
+                            f"{base_url}/get_model_info",       # ✅ Available - model information
+                            f"{base_url}/get_load",             # ✅ Available - current load/request stats
+                            f"{base_url}/health_generate",      # ✅ Available - health check that generates tokens
+                            f"{base_url}/v1/models",            # ✅ Available - OpenAI-compatible models endpoint
                         ]
                         
                         all_logs = []
@@ -2068,29 +2068,6 @@ async def process_pdf_raw(
     finally:
         if temp_pdf and os.path.exists(temp_pdf):
             os.unlink(temp_pdf)
-
-# Add this new endpoint before the existing endpoints, after the processor instance
-@app.get("/debug/sglang-logs")
-async def get_sglang_logs(_auth: bool = Depends(verify_api_key)):
-    """Debug endpoint to fetch raw SGLang server logs"""
-    try:
-        # Use the existing _capture_sglang_logs method
-        logs = await processor._capture_sglang_logs(settings.sglang_url)
-        
-        return {
-            "success": True,
-            "timestamp": datetime.now().isoformat(),
-            "sglang_url": settings.sglang_url,
-            "logs_length": len(logs),
-            "raw_logs": logs
-        }
-    except Exception as e:
-        logger.error(f"Failed to capture SGLang logs: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "timestamp": datetime.now().isoformat()
-        }
 
 if __name__ == "__main__":
     import uvicorn
