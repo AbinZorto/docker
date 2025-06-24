@@ -2069,6 +2069,29 @@ async def process_pdf_raw(
         if temp_pdf and os.path.exists(temp_pdf):
             os.unlink(temp_pdf)
 
+# Add this new endpoint before the existing endpoints, after the processor instance
+@app.get("/debug/sglang-logs")
+async def get_sglang_logs(_auth: bool = Depends(verify_api_key)):
+    """Debug endpoint to fetch raw SGLang server logs"""
+    try:
+        # Use the existing _capture_sglang_logs method
+        logs = await processor._capture_sglang_logs(settings.sglang_url)
+        
+        return {
+            "success": True,
+            "timestamp": datetime.now().isoformat(),
+            "sglang_url": settings.sglang_url,
+            "logs_length": len(logs),
+            "raw_logs": logs
+        }
+    except Exception as e:
+        logger.error(f"Failed to capture SGLang logs: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
