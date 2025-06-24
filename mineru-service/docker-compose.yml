@@ -29,6 +29,10 @@ services:
 
       # NEW: Model storage volume for GPU models
       - mineru_models:/app/models
+      # CRITICAL: HuggingFace cache persistence (this fixes the 10-minute download issue)
+      - hf_cache:/root/.cache/huggingface
+      # Optional: PyTorch compilation cache
+      - torch_cache:/root/.cache/torch
     depends_on:
       - redis
     restart: unless-stopped
@@ -66,3 +70,5 @@ services:
 volumes:
   redis_data: # Your existing volume
   mineru_models: # NEW: For GPU model storage
+  hf_cache: # CRITICAL: HuggingFace model cache persistence
+  torch_cache: # Optional: PyTorch compilation cache
