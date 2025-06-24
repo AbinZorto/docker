@@ -55,7 +55,9 @@ class Settings(BaseModel):
     # 🚀 NEW: SGLang client settings
     mineru_device: str = os.getenv("MINERU_DEVICE", "cuda")  # Default to cuda for SGLang
     mineru_backend: str = os.getenv("MINERU_BACKEND", "vlm-sglang-client")  # Default to SGLang client
-    sglang_url: str = os.getenv("SGLANG_URL", "http://127.0.0.1:8001")  # SGLang server URL
+    sglang_url: str = os.getenv("SGLANG_URL", "http://127.0.0.1:8001")  # SGLang server URL (internal container)
+    sglang_host: str = os.getenv("SLANG_HOST", "0.0.0.0")  # SGLang bind host
+    sglang_port: int = int(os.getenv("SLANG_PORT", "8001"))  # SGLang port
     model_cache_dir: str = os.getenv("MODEL_CACHE_DIR", "/app/models")
 
 settings = Settings()
@@ -102,8 +104,8 @@ class ProcessingOptions(BaseModel):
     vram: Optional[int] = Field(default=None, description="Max GPU VRAM usage per process (MB)")
     model_source: str = Field(default="huggingface", description="Model source: huggingface, modelscope, local")
     
-    # 🚀 NEW: SGLang client options
-    sglang_url: str = Field(default=settings.sglang_url, description="SGLang server URL")
+    # 🚀 NEW: SGLang client options  
+    sglang_url: str = Field(default=settings.sglang_url, description="SGLang server URL (internal container address)")
     
     # Output options
     output_format: str = Field(default="both", description="Output format: json, markdown, or both")
@@ -189,18 +191,55 @@ async def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(sec
 
 # 🚀 SGLang server health check
 async def check_sglang_server(url: str) -> bool:
-    """Check if SGLang server is available"""
+    """Check if SGLang server is available (internal container)"""
     try:
         import aiohttp
+        
+        # Use internal container address
+        if url.startswith("http://127.0.0.1:8001") or url.startswith("http://localhost:8001"):
+            check_url = url
+        else:
+            check_url = "http://127.0.0.1:8001"
+            
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"{url}/get_server_info", timeout=5) as response:
-                return response.status == 200
+            # Try multiple endpoints to check if SGLang is responsive
+            endpoints_to_check = [
+                f"{check_url}/get_server_info",
+                f"{check_url}/health", 
+                f"{check_url}/v1/models",
+                f"{check_url}/"
+            ]
+            
+            for endpoint in endpoints_to_check:
+                try:
+                    async with session.get(endpoint, timeout=5) as response:
+                        if response.status == 200:
+                            logger.debug(f"✅ SGLang server responsive at {endpoint}")
+                            return True
+                except:
+                    continue
+                    
+            logger.debug(f"❌ SGLang server not responsive at {check_url}")
+            return False
     except:
         try:
-            # Fallback to curl/requests
+            # Fallback to requests (synchronous)
             import requests
-            response = requests.get(f"{url}/get_server_info", timeout=5)
-            return response.status_code == 200
+            check_url = "http://127.0.0.1:8001"
+            endpoints_to_check = [
+                f"{check_url}/get_server_info",
+                f"{check_url}/health", 
+                f"{check_url}/"
+            ]
+            
+            for endpoint in endpoints_to_check:
+                try:
+                    response = requests.get(endpoint, timeout=3)
+                    if response.status_code == 200:
+                        return True
+                except:
+                    continue
+            return False
         except:
             return False
 
@@ -241,11 +280,22 @@ def parse_token_usage_from_logs(stdout: str, stderr: str, model_name: str = None
     logger.debug(f"🔍 Searching for token usage in {len(combined_logs)} characters of logs")
     logger.debug(f"🔍 Combined logs sample (first 500 chars): {combined_logs[:500]}")
     
-    # More comprehensive patterns for token usage in logs
+    # More comprehensive patterns for token usage in logs - prioritize SGLang patterns
     patterns = [
-        # SGLang format: "prompt_tokens": 1234, "completion_tokens": 567
+        # SGLang server API response patterns (most likely to contain token usage)
         (r'"prompt_tokens":\s*(\d+).*?"completion_tokens":\s*(\d+)', "SGLang JSON format"),
         (r"'prompt_tokens':\s*(\d+).*?'completion_tokens':\s*(\d+)", "SGLang Python dict format"),
+        (r'"input_tokens":\s*(\d+).*?"output_tokens":\s*(\d+)', "SGLang input/output JSON format"),
+        (r'"total_prompt_tokens":\s*(\d+).*?"total_completion_tokens":\s*(\d+)', "SGLang total tokens JSON"),
+        
+        # SGLang server info/stats patterns
+        (r'prompt_tokens["\']?\s*:\s*(\d+).*?completion_tokens["\']?\s*:\s*(\d+)', "SGLang server stats format"),
+        (r'input_tokens["\']?\s*:\s*(\d+).*?output_tokens["\']?\s*:\s*(\d+)', "SGLang server input/output stats"),
+        (r'total_input_tokens["\']?\s*:\s*(\d+).*?total_output_tokens["\']?\s*:\s*(\d+)', "SGLang total input/output"),
+        
+        # SGLang request/response patterns
+        (r'num_prompt_tokens[:\s=]+(\d+).*?num_generated_tokens[:\s=]+(\d+)', "SGLang num tokens format"),
+        (r'request.*?input_len[:\s=]+(\d+).*?output_len[:\s=]+(\d+)', "SGLang request length format"),
         
         # OpenAI-style usage reporting
         (r'usage.*?"prompt_tokens":\s*(\d+).*?"completion_tokens":\s*(\d+)', "OpenAI usage format"),
@@ -257,11 +307,7 @@ def parse_token_usage_from_logs(stdout: str, stderr: str, model_name: str = None
         (r'prompt:\s*(\d+)\s*tokens.*?completion:\s*(\d+)\s*tokens', "Descriptive tokens format"),
         (r'(\d+)\s*prompt\s*tokens.*?(\d+)\s*completion\s*tokens', "Tokens with description"),
         
-        # SGLang client specific patterns
-        (r'total_prompt_tokens[:\s=]+(\d+).*?total_completion_tokens[:\s=]+(\d+)', "SGLang total tokens"),
-        (r'request.*?prompt_tokens[:\s=]+(\d+).*?completion_tokens[:\s=]+(\d+)', "SGLang request format"),
-        
-        # Generic usage patterns
+        # Generic usage patterns (fallback)
         (r'tokens.*?prompt[:\s=]+(\d+).*?completion[:\s=]+(\d+)', "Generic tokens format"),
         (r'usage.*?input[:\s=]+(\d+).*?output[:\s=]+(\d+)', "Generic usage format"),
     ]
@@ -316,6 +362,91 @@ class MinerUProcessor:
         self.temp_dir = Path("/tmp/mineru_processing")
         self.temp_dir.mkdir(exist_ok=True)
     
+    async def _capture_sglang_logs(self, sglang_url: str) -> str:
+        """Capture logs from SGLang server running in same container"""
+        try:
+            import aiohttp
+            
+            # Use internal container address - override if using external URL  
+            if sglang_url.startswith("http://127.0.0.1:8001") or sglang_url.startswith("http://localhost:8001"):
+                base_url = sglang_url
+            else:
+                # If external URL provided, convert to internal container address
+                base_url = "http://127.0.0.1:8001"
+                logger.info(f"🔄 Using internal SGLang URL: {base_url} instead of {sglang_url}")
+            
+            # Give SGLang server time to start if this is early in container lifecycle
+            max_retries = 3
+            for retry in range(max_retries):
+                try:
+                    async with aiohttp.ClientSession(
+                        timeout=aiohttp.ClientTimeout(total=15, connect=5)
+                    ) as session:
+                        # Try to get server info and recent logs - prioritize token-rich endpoints
+                        endpoints_to_try = [
+                            f"{base_url}/get_server_info",      # Usually contains server stats
+                            f"{base_url}/stats",                # May contain usage stats  
+                            f"{base_url}/get_model_info",       # Model information
+                            f"{base_url}/metrics",              # Prometheus-style metrics
+                            f"{base_url}/v1/models",            # OpenAI-compatible models endpoint
+                            f"{base_url}/health",               # Basic health check
+                            f"{base_url}/",                     # Root endpoint (may show stats)
+                        ]
+                        
+                        all_logs = []
+                        successful_endpoints = 0
+                        
+                        for endpoint in endpoints_to_try:
+                            try:
+                                async with session.get(endpoint, timeout=10) as response:
+                                    if response.status == 200:
+                                        data = await response.text()
+                                        all_logs.append(f"=== {endpoint} ===\n{data}\n")
+                                        successful_endpoints += 1
+                                        logger.info(f"📋 Captured {len(data)} characters from {endpoint}")
+                                        
+                                        # Log a preview of potentially relevant data
+                                        if any(keyword in data.lower() for keyword in ['token', 'usage', 'prompt', 'completion', 'requests', 'processed']):
+                                            logger.info(f"🔍 Found token-related data in {endpoint}")
+                                            # Log first 300 chars that might contain token info
+                                            token_pos = data.lower().find('token')
+                                            if token_pos >= 0:
+                                                relevant_snippet = data[max(0, token_pos-50):token_pos+250]
+                                            else:
+                                                relevant_snippet = data[:300]
+                                            logger.info(f"📊 Token snippet from {endpoint}: {relevant_snippet}")
+                                    else:
+                                        logger.debug(f"Got {response.status} from {endpoint}")
+                            except asyncio.TimeoutError:
+                                logger.debug(f"Timeout accessing {endpoint}")
+                            except Exception as e:
+                                logger.debug(f"Could not get logs from {endpoint}: {e}")
+                        
+                        if successful_endpoints > 0:
+                            combined_logs = "\n".join(all_logs)
+                            logger.info(f"📋 Total SGLang logs captured: {len(combined_logs)} characters from {successful_endpoints}/{len(endpoints_to_try)} endpoints")
+                            return combined_logs
+                        else:
+                            if retry < max_retries - 1:
+                                logger.warning(f"No SGLang endpoints responded, retrying in 2 seconds... (attempt {retry + 1}/{max_retries})")
+                                await asyncio.sleep(2)
+                                continue
+                            else:
+                                logger.warning(f"No SGLang endpoints responded after {max_retries} attempts")
+                                return ""
+                                
+                except aiohttp.ClientError as e:
+                    if retry < max_retries - 1:
+                        logger.warning(f"SGLang connection failed, retrying... (attempt {retry + 1}/{max_retries}): {e}")
+                        await asyncio.sleep(2)
+                        continue
+                    else:
+                        raise e
+                        
+        except Exception as e:
+            logger.warning(f"Failed to capture SGLang server logs: {e}")
+            return ""
+
     def _detect_model_name(self, stdout: str, stderr: str, options: ProcessingOptions) -> Optional[str]:
         """Try to detect the model name being used from logs or configuration"""
         import re
@@ -447,7 +578,8 @@ class MinerUProcessor:
         if not MINERU_AVAILABLE:
             raise HTTPException(status_code=503, detail="MinerU not available")
         
-        # 🚀 Check SGLang server if using client mode
+        # 🚀 Check SGLang server if using client mode and capture server logs
+        sglang_logs = ""
         if options.backend == "vlm-sglang-client":
             sglang_available = await check_sglang_server(options.sglang_url)
             if not sglang_available:
@@ -455,6 +587,8 @@ class MinerUProcessor:
                 options.backend = "vlm-sglang-engine"
             else:
                 logger.info(f"✅ SGLang server available at {options.sglang_url}")
+                # Capture SGLang server logs before processing
+                sglang_logs = await self._capture_sglang_logs(options.sglang_url)
         
         # Create temporary output directory
         output_dir = self.temp_dir / f"output_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
@@ -485,19 +619,24 @@ class MinerUProcessor:
             logger.info(f"🔍 MinerU process completed with return code: {process.returncode}")
             logger.info(f"📝 stdout length: {len(stdout_str)} chars, stderr length: {len(stderr_str)} chars")
             
+            # ==== COMPLETE LOG CAPTURE FOR TOKEN ANALYSIS ====
+            logger.info("=" * 100)
+            logger.info("🔍 COMPLETE STDOUT CAPTURE (FULL CONTENT):")
+            logger.info("=" * 100)
             if stdout_str:
-                logger.info(f"📤 MinerU stdout (first 1000 chars): {stdout_str[:1000]}")
-                if len(stdout_str) > 1000:
-                    logger.info(f"📤 MinerU stdout (last 500 chars): ...{stdout_str[-500:]}")
+                logger.info(stdout_str)
             else:
-                logger.warning("⚠️  MinerU stdout is empty")
-                
+                logger.info("(STDOUT IS COMPLETELY EMPTY)")
+            
+            logger.info("=" * 100)
+            logger.info("🔍 COMPLETE STDERR CAPTURE (FULL CONTENT):")
+            logger.info("=" * 100)
             if stderr_str:
-                logger.info(f"📥 MinerU stderr (first 1000 chars): {stderr_str[:1000]}")
-                if len(stderr_str) > 1000:
-                    logger.info(f"📥 MinerU stderr (last 500 chars): ...{stderr_str[-500:]}")
+                logger.info(stderr_str)
             else:
-                logger.info("ℹ️  MinerU stderr is empty")
+                logger.info("(STDERR IS COMPLETELY EMPTY)")
+            logger.info("=" * 100)
+            # ==== END COMPLETE LOG CAPTURE ====
             
             if process.returncode != 0:
                 error_msg = stderr_str if stderr_str else "Unknown error"
@@ -508,13 +647,35 @@ class MinerUProcessor:
             detected_model = self._detect_model_name(stdout_str, stderr_str, options)
             logger.info(f"🤖 Detected model: {detected_model}")
             
-            # Parse token usage from logs with detailed debugging
+            # Parse token usage - prioritize SGLang server logs, fallback to stdout/stderr
             logger.info("🔢 Attempting to parse token usage from logs...")
-            token_usage = parse_token_usage_from_logs(stdout_str, stderr_str, model_name=detected_model)
-            if token_usage:
-                logger.info(f"✅ Token usage found: {token_usage.prompt_tokens} + {token_usage.completion_tokens} = {token_usage.total_tokens} tokens")
-            else:
-                logger.warning("❌ No token usage found in logs")
+            token_usage = None
+            
+            if options.backend == "vlm-sglang-client":
+                # Capture fresh SGLang server logs after processing to get token usage
+                logger.info("🚀 Capturing fresh SGLang server logs post-processing...")
+                post_processing_logs = await self._capture_sglang_logs(options.sglang_url)
+                
+                if post_processing_logs:
+                    logger.info("🔍 Parsing token usage from post-processing SGLang server logs...")
+                    token_usage = parse_token_usage_from_logs(post_processing_logs, "", model_name=detected_model)
+                    if token_usage:
+                        logger.info(f"✅ Token usage found in SGLang post-processing logs: {token_usage.prompt_tokens} + {token_usage.completion_tokens} = {token_usage.total_tokens} tokens")
+                
+                # Fallback to pre-processing logs if no token usage found
+                if not token_usage and sglang_logs:
+                    logger.info("🔄 Fallback: Parsing token usage from pre-processing SGLang server logs...")
+                    token_usage = parse_token_usage_from_logs(sglang_logs, "", model_name=detected_model)
+                    if token_usage:
+                        logger.info(f"✅ Token usage found in SGLang pre-processing logs: {token_usage.prompt_tokens} + {token_usage.completion_tokens} = {token_usage.total_tokens} tokens")
+            
+            if not token_usage:
+                logger.info("🔄 Final fallback: Parsing token usage from MinerU stdout/stderr...")
+                token_usage = parse_token_usage_from_logs(stdout_str, stderr_str, model_name=detected_model)
+                if token_usage:
+                    logger.info(f"✅ Token usage found in MinerU logs: {token_usage.prompt_tokens} + {token_usage.completion_tokens} = {token_usage.total_tokens} tokens")
+                else:
+                    logger.warning("❌ No token usage found in any logs")
             
             # Parse MinerU output
             result = await self._parse_mineru_output(output_dir, options)
@@ -1749,13 +1910,20 @@ async def get_status():
         "mineru_available": MINERU_AVAILABLE,
         "redis_available": redis_client is not None,
         "sglang_server_available": sglang_status,
-        "sglang_url": settings.sglang_url,
+        "sglang_url_internal": "http://127.0.0.1:8001",  # Internal container address
+        "sglang_url_external": f"https://mineru.writemine.com/slang/",  # External proxy URL
+        "sglang_configured_url": settings.sglang_url,
         "max_file_size_mb": settings.max_file_size // (1024 * 1024),
         "cache_ttl_seconds": settings.cache_ttl,
         "supported_backends": ["pipeline", "vlm-transformers", "vlm-sglang-engine", "vlm-sglang-client"],
         "supported_methods": ["auto", "txt", "ocr"],
         "supported_formats": ["pdf"],
-        "default_backend": settings.mineru_backend
+        "default_backend": settings.mineru_backend,
+        "container_info": {
+            "sglang_host": settings.sglang_host,
+            "sglang_port": settings.sglang_port,
+            "model_cache_dir": settings.model_cache_dir
+        }
     }
 
 @app.post("/process-pdf", response_model=ProcessingResponse)
