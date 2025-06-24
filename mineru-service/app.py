@@ -158,11 +158,20 @@ class StructuredContent(BaseModel):
     abstract: Optional[str] = None
     sections: List[Section]
 
+class TokenUsage(BaseModel):
+    """Token usage information from the language model"""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    cost_estimate_usd: Optional[float] = None
+    model_name: Optional[str] = None
+
 class ProcessingMetadata(BaseModel):
     totalPages: int
     processingTimeMs: int
     detectedLanguage: str
     documentType: str
+    tokenUsage: Optional[TokenUsage] = None
 
 class ProcessingResponse(BaseModel):
     success: bool
@@ -195,11 +204,116 @@ async def check_sglang_server(url: str) -> bool:
         except:
             return False
 
+# Token cost estimation (approximate rates for common models)
+TOKEN_COSTS = {
+    # Model name patterns -> (input cost per 1M tokens, output cost per 1M tokens)
+    "gpt-4": (0.03, 0.06),
+    "gpt-4-turbo": (0.01, 0.03),
+    "gpt-3.5-turbo": (0.001, 0.002),
+    "claude-3": (0.015, 0.075),
+    "claude-2": (0.008, 0.024),
+    "llama": (0.0002, 0.0002),  # Estimate for Llama models
+    "default": (0.001, 0.002)   # Fallback estimate
+}
+
+def estimate_token_cost(prompt_tokens: int, completion_tokens: int, model_name: str = None) -> float:
+    """Estimate cost based on token usage and model"""
+    if not model_name:
+        input_rate, output_rate = TOKEN_COSTS["default"]
+    else:
+        # Find matching model pattern
+        input_rate, output_rate = TOKEN_COSTS["default"]
+        for pattern, rates in TOKEN_COSTS.items():
+            if pattern.lower() in model_name.lower():
+                input_rate, output_rate = rates
+                break
+    
+    cost = (prompt_tokens / 1_000_000) * input_rate + (completion_tokens / 1_000_000) * output_rate
+    return round(cost, 6)
+
+def parse_token_usage_from_logs(stdout: str, stderr: str, model_name: str = None) -> Optional[TokenUsage]:
+    """Parse token usage from MinerU/SGLang logs"""
+    token_usage = TokenUsage()
+    
+    # Combine stdout and stderr for searching
+    combined_logs = (stdout + "\n" + stderr).lower()
+    
+    # Common patterns for token usage in logs
+    patterns = [
+        # SGLang format: "prompt_tokens": 1234, "completion_tokens": 567
+        r'"prompt_tokens":\s*(\d+).*?"completion_tokens":\s*(\d+)',
+        r"'prompt_tokens':\s*(\d+).*?'completion_tokens':\s*(\d+)",
+        
+        # Alternative formats
+        r'input_tokens[:\s]+(\d+).*?output_tokens[:\s]+(\d+)',
+        r'tokens_input[:\s]+(\d+).*?tokens_output[:\s]+(\d+)',
+        r'prompt:\s*(\d+)\s*tokens.*?completion:\s*(\d+)\s*tokens',
+        
+        # Usage summary format
+        r'usage.*?prompt_tokens[:\s]+(\d+).*?completion_tokens[:\s]+(\d+)',
+    ]
+    
+    import re
+    for pattern in patterns:
+        match = re.search(pattern, combined_logs, re.IGNORECASE | re.DOTALL)
+        if match:
+            prompt_tokens = int(match.group(1))
+            completion_tokens = int(match.group(2))
+            
+            token_usage.prompt_tokens = prompt_tokens
+            token_usage.completion_tokens = completion_tokens
+            token_usage.total_tokens = prompt_tokens + completion_tokens
+            token_usage.model_name = model_name
+            token_usage.cost_estimate_usd = estimate_token_cost(prompt_tokens, completion_tokens, model_name)
+            
+            logger.info(f"🔢 Token usage parsed: {prompt_tokens} prompt + {completion_tokens} completion = {token_usage.total_tokens} total tokens")
+            logger.info(f"💰 Estimated cost: ${token_usage.cost_estimate_usd:.6f} USD")
+            
+            return token_usage
+    
+    logger.debug("No token usage information found in logs")
+    return None
+
 # MinerU Processor using official command-line interface
 class MinerUProcessor:
     def __init__(self):
         self.temp_dir = Path("/tmp/mineru_processing")
         self.temp_dir.mkdir(exist_ok=True)
+    
+    def _detect_model_name(self, stdout: str, stderr: str, options: ProcessingOptions) -> Optional[str]:
+        """Try to detect the model name being used from logs or configuration"""
+        import re
+        
+        combined_logs = stdout + "\n" + stderr
+        
+        # Common model name patterns in logs
+        model_patterns = [
+            r'model[_\s]*name[:\s]*["\']?([^"\'\s,}]+)',
+            r'using[_\s]*model[:\s]*["\']?([^"\'\s,}]+)',
+            r'loaded[_\s]*model[:\s]*["\']?([^"\'\s,}]+)',
+            r'model[:\s]*["\']?([^"\'\s,}]+)["\']?',
+            r'checkpoint[:\s]*["\']?([^"\'\s,}]+)',
+        ]
+        
+        for pattern in model_patterns:
+            matches = re.findall(pattern, combined_logs, re.IGNORECASE)
+            for match in matches:
+                # Filter out common non-model words
+                if match and len(match) > 3 and not any(skip in match.lower() for skip in 
+                    ['json', 'config', 'true', 'false', 'none', 'null', 'error', 'warning']):
+                    logger.info(f"🤖 Detected model name: {match}")
+                    return match
+        
+        # Fallback: try to infer from backend
+        if 'gpt' in options.backend.lower():
+            return 'gpt-4'
+        elif 'claude' in options.backend.lower():
+            return 'claude-3'
+        elif 'llama' in options.backend.lower():
+            return 'llama'
+        
+        logger.debug("Could not detect model name from logs")
+        return None
         
     def _build_mineru_command(self, input_path: str, output_dir: str, options: ProcessingOptions) -> List[str]:
         """Build MinerU command based on options"""
@@ -288,19 +402,33 @@ class MinerUProcessor:
             
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)  # 5 minute timeout
             
+            # Decode logs for processing
+            stdout_str = stdout.decode() if stdout else ""
+            stderr_str = stderr.decode() if stderr else ""
+            
             # Log stdout and stderr for debugging
-            if stdout:
-                logger.info(f"MinerU stdout: {stdout.decode()}")
-            if stderr:
-                logger.warning(f"MinerU stderr: {stderr.decode()}")
+            if stdout_str:
+                logger.info(f"MinerU stdout: {stdout_str}")
+            if stderr_str:
+                logger.warning(f"MinerU stderr: {stderr_str}")
             
             if process.returncode != 0:
-                error_msg = stderr.decode() if stderr else "Unknown error"
+                error_msg = stderr_str if stderr_str else "Unknown error"
                 logger.error(f"MinerU command failed with return code {process.returncode}: {error_msg}")
                 raise ValueError(f"MinerU processing failed (code {process.returncode}): {error_msg}")
             
+            # Try to detect model name from logs for better cost estimation
+            detected_model = self._detect_model_name(stdout_str, stderr_str, options)
+            
+            # Parse token usage from logs
+            token_usage = parse_token_usage_from_logs(stdout_str, stderr_str, model_name=detected_model)
+            
             # Parse MinerU output
             result = await self._parse_mineru_output(output_dir, options)
+            
+            # Add token usage to metadata
+            if token_usage:
+                result.metadata.tokenUsage = token_usage
             
             processing_time = (datetime.now() - start_time).total_seconds() * 1000
             result.metadata.processingTimeMs = int(processing_time)
