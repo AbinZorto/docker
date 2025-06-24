@@ -420,6 +420,61 @@ class MinerUProcessor:
             except Exception as e:
                 logger.warning(f"Failed to capture system logs: {e}")
             
+            # 🔥 CRITICAL: Read the actual SGLang server log file content
+            logger.info("🔥 READING SGLANG SERVER LOG FILE...")
+            sglang_log_file = "/app/logs/sglang_server.log"
+            try:
+                if os.path.exists(sglang_log_file):
+                    # Get the last 500 lines to capture recent token usage
+                    result = subprocess.run(
+                        ["tail", "-500", sglang_log_file],
+                        capture_output=True, text=True, timeout=10
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        all_logs.append(f"=== SGLANG SERVER LOG FILE ({sglang_log_file}) - LAST 500 LINES ===\n{result.stdout.strip()}")
+                        logger.info(f"📋 Captured {len(result.stdout)} characters from SGLang log file")
+                        
+                        # Also capture just the most recent lines for token usage analysis
+                        recent_result = subprocess.run(
+                            ["tail", "-50", sglang_log_file],
+                            capture_output=True, text=True, timeout=5
+                        )
+                        if recent_result.returncode == 0:
+                            all_logs.append(f"=== RECENT SGLANG LOG ENTRIES (last 50 lines) ===\n{recent_result.stdout.strip()}")
+                            
+                        # Search for token-related lines in the log file
+                        token_search_result = subprocess.run(
+                            ["grep", "-i", "-E", "(token|usage|prompt|completion|request.*complete)", sglang_log_file, "|", "tail", "-20"],
+                            shell=True, capture_output=True, text=True, timeout=5
+                        )
+                        if token_search_result.returncode == 0 and token_search_result.stdout.strip():
+                            all_logs.append(f"=== TOKEN-RELATED LOG LINES ===\n{token_search_result.stdout.strip()}")
+                            logger.info(f"🎯 Found token-related lines in SGLang log: {len(token_search_result.stdout)} chars")
+                        
+                    else:
+                        all_logs.append(f"=== SGLANG LOG FILE ACCESS FAILED ===\nReturn code: {result.returncode}\nError: {result.stderr}")
+                        logger.warning(f"Failed to read SGLang log file: return code {result.returncode}")
+                else:
+                    all_logs.append(f"=== SGLANG LOG FILE NOT FOUND ===\nPath: {sglang_log_file}")
+                    logger.warning(f"SGLang log file not found at {sglang_log_file}")
+                    
+                    # Try alternative log locations
+                    alternative_paths = [
+                        "/tmp/sglang_server.log",
+                        "/var/log/sglang_server.log", 
+                        "/app/sglang_server.log",
+                        "/tmp/sglang.log"
+                    ]
+                    for alt_path in alternative_paths:
+                        if os.path.exists(alt_path):
+                            logger.info(f"🔍 Found alternative SGLang log at: {alt_path}")
+                            all_logs.append(f"=== ALTERNATIVE SGLANG LOG FOUND: {alt_path} ===")
+                            break
+                            
+            except Exception as e:
+                all_logs.append(f"=== SGLANG LOG FILE READ ERROR ===\n{str(e)}")
+                logger.error(f"Failed to read SGLang log file: {e}")
+            
             # Then capture API endpoints  
             logger.info("🔍 CAPTURING API ENDPOINT DATA...")
             max_retries = 3
