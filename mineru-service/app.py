@@ -268,54 +268,83 @@ def estimate_token_cost(prompt_tokens: int, completion_tokens: int, model_name: 
     cost = (prompt_tokens / 1_000_000) * input_rate + (completion_tokens / 1_000_000) * output_rate
     return round(cost, 6)
 
-def parse_token_usage_from_sglang_delta(pre_logs: str, post_logs: str, model_name: str = None) -> Optional[TokenUsage]:
-    """Parse token usage by calculating the delta between pre and post SGLang logs"""
+def parse_token_usage_from_sglang_throughput(logs: str, processing_time_ms: float, model_name: str = None) -> Optional[TokenUsage]:
+    """Parse token usage using throughput data and processing time - much more accurate approach"""
     import re
     
     try:
         token_usage = TokenUsage()
         
-        # Extract prefill tokens from both logs
+        # Extract all prefill tokens for input token calculation
         prefill_pattern = r'Prefill batch.*?#new-token:\s*(\d+)'
+        prefill_matches = re.findall(prefill_pattern, logs, re.IGNORECASE)
         
-        pre_prefills = re.findall(prefill_pattern, pre_logs, re.IGNORECASE)
-        post_prefills = re.findall(prefill_pattern, post_logs, re.IGNORECASE)
+        # Sum all new tokens from prefill batches during this processing
+        input_tokens = sum(int(token) for token in prefill_matches) if prefill_matches else 0
         
-        # Calculate new prefill tokens (tokens added during this request)
-        pre_total_input = sum(int(token) for token in pre_prefills) if pre_prefills else 0
-        post_total_input = sum(int(token) for token in post_prefills) if post_prefills else 0
-        new_input_tokens = max(0, post_total_input - pre_total_input)
+        # Extract throughput information from decode batches
+        # Pattern: gen throughput (token/s): 355.73
+        throughput_pattern = r'gen throughput \(token/s\):\s*([\d.]+)'
+        throughput_matches = re.findall(throughput_pattern, logs, re.IGNORECASE)
         
-        # Extract decode batches from both logs
-        decode_pattern = r'Decode batch'
-        
-        pre_decodes = len(re.findall(decode_pattern, pre_logs, re.IGNORECASE))
-        post_decodes = len(re.findall(decode_pattern, post_logs, re.IGNORECASE))
-        
-        # Calculate new decode batches (decode batches from this request)
-        new_decode_batches = max(0, post_decodes - pre_decodes)
-        
-        # Estimate output tokens based on new decode batches
-        # Each decode batch typically represents 20-50 tokens
-        estimated_output_tokens = new_decode_batches * 35
-        
-        if new_input_tokens > 0 or estimated_output_tokens > 0:
-            token_usage.prompt_tokens = new_input_tokens
-            token_usage.completion_tokens = estimated_output_tokens
-            token_usage.total_tokens = new_input_tokens + estimated_output_tokens
-            token_usage.model_name = model_name
-            token_usage.cost_estimate_usd = estimate_token_cost(new_input_tokens, estimated_output_tokens, model_name)
+        if throughput_matches and processing_time_ms > 0:
+            # Use the most recent/highest throughput value (typically more stable)
+            throughput_values = [float(t) for t in throughput_matches if float(t) > 0]
             
-            logger.info(f"🎯 SGLang delta token usage: {new_input_tokens} input + {estimated_output_tokens} output = {token_usage.total_tokens} total (delta: {new_decode_batches} decodes)")
-            logger.info(f"💰 Estimated cost: ${token_usage.cost_estimate_usd:.6f} USD")
-            
-            return token_usage
+            if throughput_values:
+                # Use median throughput for stability (avoids outliers)
+                median_throughput = sorted(throughput_values)[len(throughput_values) // 2]
+                
+                # Calculate output tokens: throughput (tokens/sec) * time (sec)
+                processing_time_sec = processing_time_ms / 1000
+                estimated_output_tokens = int(median_throughput * processing_time_sec)
+                
+                # Validation: ensure output tokens are reasonable
+                if estimated_output_tokens > 100000:  # Cap at 100k tokens for safety
+                    estimated_output_tokens = min(estimated_output_tokens, 100000)
+                    logger.warning(f"Capped estimated output tokens at 100k (was {int(median_throughput * processing_time_sec)})")
+                
+                token_usage.prompt_tokens = input_tokens
+                token_usage.completion_tokens = estimated_output_tokens
+                token_usage.total_tokens = input_tokens + estimated_output_tokens
+                token_usage.model_name = model_name
+                token_usage.cost_estimate_usd = estimate_token_cost(input_tokens, estimated_output_tokens, model_name)
+                
+                logger.info(f"🎯 SGLang throughput-based token usage: {input_tokens} input + {estimated_output_tokens} output = {token_usage.total_tokens} total")
+                logger.info(f"📊 Calculation: {median_throughput:.1f} tok/s × {processing_time_sec:.1f}s = {estimated_output_tokens} output tokens")
+                logger.info(f"💰 Estimated cost: ${token_usage.cost_estimate_usd:.6f} USD")
+                
+                return token_usage
+            else:
+                logger.debug("No valid throughput values found in SGLang logs")
         else:
-            logger.debug("No new tokens detected in SGLang delta analysis")
-            return None
+            logger.debug("No throughput data found or invalid processing time")
+            
+        # Fallback: if we have input tokens but no throughput, estimate based on decode batches
+        if input_tokens > 0:
+            decode_pattern = r'Decode batch'
+            decode_count = len(re.findall(decode_pattern, logs, re.IGNORECASE))
+            
+            if decode_count > 0:
+                # Conservative estimate: ~30 tokens per decode batch
+                estimated_output_tokens = decode_count * 30
+                
+                token_usage.prompt_tokens = input_tokens
+                token_usage.completion_tokens = estimated_output_tokens
+                token_usage.total_tokens = input_tokens + estimated_output_tokens
+                token_usage.model_name = model_name
+                token_usage.cost_estimate_usd = estimate_token_cost(input_tokens, estimated_output_tokens, model_name)
+                
+                logger.info(f"🎯 SGLang fallback token usage: {input_tokens} input + {estimated_output_tokens} output = {token_usage.total_tokens} total ({decode_count} decodes)")
+                logger.info(f"💰 Estimated cost: ${token_usage.cost_estimate_usd:.6f} USD")
+                
+                return token_usage
+        
+        logger.debug("Could not calculate token usage from SGLang throughput data")
+        return None
             
     except Exception as e:
-        logger.warning(f"Error parsing SGLang delta token usage: {e}")
+        logger.warning(f"Error parsing SGLang throughput token usage: {e}")
         return None
 
 def parse_token_usage_from_logs(stdout: str, stderr: str, model_name: str = None) -> Optional[TokenUsage]:
@@ -800,29 +829,33 @@ class MinerUProcessor:
                 else:
                     logger.info("❌ No pre-processing SGLang logs")
             
-            # 🧮 Detect model name and parse token usage using delta approach
+            # 🧮 Detect model name and parse token usage using throughput approach
             logger.info("🧮 Parsing token usage from logs...")
             detected_model_name = self._detect_model_name(stdout_str, stderr_str, options)
             token_usage = None
             
-            # For SGLang backend, use delta-based token counting for accuracy
-            if options.backend == "vlm-sglang-client" and sglang_logs and post_processing_logs:
-                logger.info("🔍 Using SGLang delta analysis for accurate token counting")
-                token_usage = parse_token_usage_from_sglang_delta(sglang_logs, post_processing_logs, detected_model_name)
+            # For SGLang backend, use throughput-based token counting for accuracy
+            if options.backend == "vlm-sglang-client" and post_processing_logs:
+                logger.info("🔍 Using SGLang throughput analysis for accurate token counting")
+                token_usage = parse_token_usage_from_sglang_throughput(
+                    post_processing_logs, 
+                    processing_time, 
+                    detected_model_name
+                )
                 
                 if token_usage:
-                    logger.info("✅ Successfully calculated token usage from SGLang delta analysis")
+                    logger.info("✅ Successfully calculated token usage from SGLang throughput analysis")
                 else:
-                    logger.warning("⚠️ SGLang delta analysis didn't find token usage, trying fallback methods")
+                    logger.warning("⚠️ SGLang throughput analysis didn't find token usage, trying fallback methods")
             
             # Fallback: Try to parse token usage from stdout/stderr
             if not token_usage:
                 token_usage = parse_token_usage_from_logs(stdout_str, stderr_str, detected_model_name)
                 
             # If still no token usage, try the old method on SGLang logs as final fallback
-            if not token_usage and sglang_logs:
-                logger.info(f"🔍 Fallback: Attempting to parse token usage from {len(sglang_logs)} characters of SGLang logs")
-                token_usage = parse_token_usage_from_logs("", sglang_logs, detected_model_name)
+            if not token_usage and post_processing_logs:
+                logger.info(f"🔍 Fallback: Attempting to parse token usage from {len(post_processing_logs)} characters of SGLang logs")
+                token_usage = parse_token_usage_from_logs("", post_processing_logs, detected_model_name)
                 if token_usage:
                     logger.info("✅ Using fallback token usage data from SGLang server logs")
             
