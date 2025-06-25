@@ -834,12 +834,15 @@ class MinerUProcessor:
             detected_model_name = self._detect_model_name(stdout_str, stderr_str, options)
             token_usage = None
             
+            # Calculate processing time for token usage analysis
+            processing_time_ms = (datetime.now() - start_time).total_seconds() * 1000
+            
             # For SGLang backend, use throughput-based token counting for accuracy
             if options.backend == "vlm-sglang-client" and post_processing_logs:
                 logger.info("🔍 Using SGLang throughput analysis for accurate token counting")
                 token_usage = parse_token_usage_from_sglang_throughput(
                     post_processing_logs, 
-                    processing_time, 
+                    processing_time_ms, 
                     detected_model_name
                 )
                 
@@ -866,10 +869,9 @@ class MinerUProcessor:
             if token_usage:
                 result.metadata.tokenUsage = token_usage
             
-            processing_time = (datetime.now() - start_time).total_seconds() * 1000
-            result.metadata.processingTimeMs = int(processing_time)
+            result.metadata.processingTimeMs = int(processing_time_ms)
             
-            logger.info(f"🚀 Processing completed in {processing_time:.0f}ms using backend: {options.backend}")
+            logger.info(f"🚀 Processing completed in {processing_time_ms:.0f}ms using backend: {options.backend}")
             return result
             
         except asyncio.TimeoutError:
