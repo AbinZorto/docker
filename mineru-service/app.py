@@ -744,8 +744,8 @@ class MinerUProcessor:
             
             # 🧮 Detect model name and parse token usage from all available logs
             logger.info("🧮 Parsing token usage from logs...")
-            detected_model_name = self._detect_model_name(stdout, stderr, options)
-            token_usage = parse_token_usage_from_logs(stdout, stderr, detected_model_name)
+            detected_model_name = self._detect_model_name(stdout_str, stderr_str, options)
+            token_usage = parse_token_usage_from_logs(stdout_str, stderr_str, detected_model_name)
             
             # Also try to parse token usage from captured SGLang logs
             if sglang_logs:
