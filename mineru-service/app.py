@@ -275,25 +275,16 @@ def parse_token_usage_from_logs(stdout: str, stderr: str, model_name: str = None
     # Combine stdout and stderr for searching
     combined_logs = stdout + "\n" + stderr
     
-    logger.debug(f"🔍 Searching for token usage in {len(combined_logs)} characters of logs")
-    logger.debug(f"🔍 Combined logs sample (first 500 chars): {combined_logs[:500]}")
-    
     import re
     
-    # 🎯 NEW: Parse SGLang-specific batch processing patterns
-    # Based on the actual SGLang logs: "Prefill batch. #new-seq: 1, #new-token: 4096, #cached-token: 0"
-    # and "Decode batch. #running-req: 10, #token: 73827, token usage: 0.05"
-    
+    # 🎯 Parse SGLang-specific batch processing patterns
     # Extract all prefill batch tokens (input tokens)
-    prefill_tokens = []
     prefill_pattern = r'Prefill batch.*?#new-token:\s*(\d+)'
     prefill_matches = re.findall(prefill_pattern, combined_logs, re.IGNORECASE)
     
     if prefill_matches:
         prefill_tokens = [int(token) for token in prefill_matches]
         total_input_tokens = sum(prefill_tokens)
-        logger.info(f"🔢 Found {len(prefill_tokens)} prefill batches with tokens: {prefill_tokens}")
-        logger.info(f"📊 Total input tokens from prefill batches: {total_input_tokens}")
         
         # Extract decode batch information to estimate output tokens
         decode_pattern = r'Decode batch.*?#token:\s*(\d+)'
@@ -308,16 +299,13 @@ def parse_token_usage_from_logs(stdout: str, stderr: str, model_name: str = None
             # Estimate output tokens (this is approximate)
             estimated_output_tokens = max(0, max_total_tokens - total_input_tokens)
             
-            logger.info(f"🔢 Found {len(decode_tokens)} decode batches, max total tokens: {max_total_tokens}")
-            logger.info(f"📊 Estimated output tokens: {estimated_output_tokens}")
-            
             token_usage.prompt_tokens = total_input_tokens
             token_usage.completion_tokens = estimated_output_tokens
             token_usage.total_tokens = total_input_tokens + estimated_output_tokens
             token_usage.model_name = model_name
             token_usage.cost_estimate_usd = estimate_token_cost(total_input_tokens, estimated_output_tokens, model_name)
             
-            logger.info(f"🎯 SGLang batch parsing: {total_input_tokens} input + {estimated_output_tokens} output = {token_usage.total_tokens} total tokens")
+            logger.info(f"🎯 SGLang token usage: {total_input_tokens} input + {estimated_output_tokens} output = {token_usage.total_tokens} total ({len(prefill_tokens)} prefills, {len(decode_tokens)} decodes)")
             logger.info(f"💰 Estimated cost: ${token_usage.cost_estimate_usd:.6f} USD")
             
             return token_usage
@@ -372,33 +360,15 @@ def parse_token_usage_from_logs(stdout: str, stderr: str, model_name: str = None
                 token_usage.model_name = model_name
                 token_usage.cost_estimate_usd = estimate_token_cost(prompt_tokens, completion_tokens, model_name)
                 
-                logger.info(f"🔢 Token usage parsed using {description}: {prompt_tokens} prompt + {completion_tokens} completion = {token_usage.total_tokens} total tokens")
+                logger.info(f"🔢 Token usage from {description}: {prompt_tokens} input + {completion_tokens} output = {token_usage.total_tokens} total")
                 logger.info(f"💰 Estimated cost: ${token_usage.cost_estimate_usd:.6f} USD")
-                logger.info(f"🎯 Matched text: {match.group(0)}")
                 
                 return token_usage
             except (ValueError, IndexError) as e:
                 logger.warning(f"⚠️  Failed to parse token numbers from match: {e}")
                 continue
     
-    # If no patterns matched, let's look for any number patterns to debug
-    number_patterns = re.findall(r'\d+', combined_logs)
-    if number_patterns:
-        logger.debug(f"🔍 Found numbers in logs: {number_patterns[:20]}...")  # Show first 20 numbers
-    
-    # Look for common token-related keywords
-    token_keywords = ['token', 'usage', 'prompt', 'completion', 'input', 'output', 'prefill', 'decode', 'batch']
-    found_keywords = []
-    for keyword in token_keywords:
-        if keyword.lower() in combined_logs.lower():
-            found_keywords.append(keyword)
-    
-    if found_keywords:
-        logger.debug(f"🔍 Found token-related keywords: {found_keywords}")
-    else:
-        logger.debug("🔍 No token-related keywords found in logs")
-    
-    logger.warning("❌ No token usage information found in logs using any known pattern")
+    logger.warning("❌ No token usage information found in logs")
     return None
 
 # MinerU Processor using official command-line interface
@@ -425,152 +395,96 @@ class MinerUProcessor:
             
             all_logs = []
             
-            # First, capture system/process logs that might contain token usage
-            logger.info("🔍 CAPTURING SYSTEM LOGS FOR SGLANG...")
-            try:
-                # Try to find SGLang process and its logs
-                system_commands = [
-                    "ps aux | grep -E '(sglang|python.*sglang)' | grep -v grep",
-                    "pgrep -fl sglang",
-                    "find /tmp -name '*sglang*' -type f -exec ls -la {} \\; 2>/dev/null",
-                    "find /app -name '*sglang*' -type f -exec ls -la {} \\; 2>/dev/null", 
-                    "find /var/log -name '*sglang*' -type f -exec ls -la {} \\; 2>/dev/null",
-                    "ls -la /tmp/ | grep sglang",
-                    "ls -la /app/ | grep sglang",
-                    # Check for Python processes that might be SGLang
-                    "ps aux | grep python | grep -v grep",
-                    # Try to get recent logs from journalctl or syslog
-                    "journalctl --no-pager -n 100 --since '10 minutes ago' 2>/dev/null | grep -i sglang || echo 'No journalctl sglang logs'",
-                    "tail -100 /var/log/syslog 2>/dev/null | grep -i sglang || echo 'No syslog sglang logs'",
-                    # Check container logs if available
-                    "dmesg | tail -50 | grep -i sglang || echo 'No dmesg sglang logs'",
-                ]
-                
-                for cmd in system_commands:
-                    try:
-                        logger.info(f"🔧 Running: {cmd}")
-                        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
-                        if result.stdout.strip():
-                            all_logs.append(f"=== SYSTEM CMD: {cmd} ===\n{result.stdout}\n")
-                            logger.info(f"📋 System command output: {result.stdout[:200]}...")
-                        if result.stderr.strip():
-                            all_logs.append(f"=== SYSTEM STDERR: {cmd} ===\n{result.stderr}\n")
-                    except subprocess.TimeoutExpired:
-                        logger.warning(f"⏰ System command timed out: {cmd}")
-                    except Exception as e:
-                        logger.debug(f"Failed system command {cmd}: {e}")
-                        
-            except Exception as e:
-                logger.warning(f"Failed to capture system logs: {e}")
+            # Capture basic system info (only in debug mode)
+            if settings.debug:
+                logger.debug("🔍 Capturing system logs...")
+                try:
+                    # Only essential commands
+                    essential_commands = [
+                        "ps aux | grep -E '(sglang|python.*sglang)' | grep -v grep",
+                        "pgrep -fl sglang",
+                    ]
+                    
+                    for cmd in essential_commands:
+                        try:
+                            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
+                            if result.stdout.strip():
+                                all_logs.append(f"=== SYSTEM: {cmd} ===\n{result.stdout}\n")
+                        except Exception as e:
+                            logger.debug(f"System command failed: {e}")
+                            
+                except Exception as e:
+                    logger.debug(f"Failed to capture system logs: {e}")
             
-            # 🔥 CRITICAL: Read the actual SGLang server log file content
-            logger.info("🔥 READING SGLANG SERVER LOG FILE...")
+            # Read SGLang server log file
             sglang_log_file = "/app/logs/sglang_server.log"
             try:
                 if os.path.exists(sglang_log_file):
-                    # Get the last 500 lines to capture recent token usage
+                    # Get recent lines that likely contain token usage
                     result = subprocess.run(
-                        ["tail", "-500", sglang_log_file],
-                        capture_output=True, text=True, timeout=10
+                        ["tail", "-200", sglang_log_file],
+                        capture_output=True, text=True, timeout=5
                     )
                     if result.returncode == 0 and result.stdout.strip():
-                        all_logs.append(f"=== SGLANG SERVER LOG FILE ({sglang_log_file}) - LAST 500 LINES ===\n{result.stdout.strip()}")
-                        logger.info(f"📋 Captured {len(result.stdout)} characters from SGLang log file")
-                        
-                        # Also capture just the most recent lines for token usage analysis
-                        recent_result = subprocess.run(
-                            ["tail", "-50", sglang_log_file],
-                            capture_output=True, text=True, timeout=5
-                        )
-                        if recent_result.returncode == 0:
-                            all_logs.append(f"=== RECENT SGLANG LOG ENTRIES (last 50 lines) ===\n{recent_result.stdout.strip()}")
-                            
-                        # Search for token-related lines in the log file
-                        token_search_result = subprocess.run(
-                            ["grep", "-i", "-E", "(token|usage|prompt|completion|request.*complete)", sglang_log_file, "|", "tail", "-20"],
-                            shell=True, capture_output=True, text=True, timeout=5
-                        )
-                        if token_search_result.returncode == 0 and token_search_result.stdout.strip():
-                            all_logs.append(f"=== TOKEN-RELATED LOG LINES ===\n{token_search_result.stdout.strip()}")
-                            logger.info(f"🎯 Found token-related lines in SGLang log: {len(token_search_result.stdout)} chars")
-                        
+                        all_logs.append(f"=== SGLANG LOG (last 200 lines) ===\n{result.stdout.strip()}")
+                        logger.info(f"📋 Captured {len(result.stdout)} chars from SGLang log file")
                     else:
-                        all_logs.append(f"=== SGLANG LOG FILE ACCESS FAILED ===\nReturn code: {result.returncode}\nError: {result.stderr}")
                         logger.warning(f"Failed to read SGLang log file: return code {result.returncode}")
                 else:
-                    all_logs.append(f"=== SGLANG LOG FILE NOT FOUND ===\nPath: {sglang_log_file}")
-                    logger.warning(f"SGLang log file not found at {sglang_log_file}")
-                    
-                    # Try alternative log locations
-                    alternative_paths = [
-                        "/tmp/sglang_server.log",
-                        "/var/log/sglang_server.log", 
-                        "/app/sglang_server.log",
-                        "/tmp/sglang.log"
-                    ]
-                    for alt_path in alternative_paths:
-                        if os.path.exists(alt_path):
-                            logger.info(f"🔍 Found alternative SGLang log at: {alt_path}")
-                            all_logs.append(f"=== ALTERNATIVE SGLANG LOG FOUND: {alt_path} ===")
-                            break
+                    logger.debug(f"SGLang log file not found at {sglang_log_file}")
+                    # Only check alternatives in debug mode
+                    if settings.debug:
+                        alternative_paths = ["/tmp/sglang_server.log", "/var/log/sglang_server.log", "/app/sglang_server.log"]
+                        for alt_path in alternative_paths:
+                            if os.path.exists(alt_path):
+                                logger.debug(f"Found alternative SGLang log at: {alt_path}")
+                                break
                             
             except Exception as e:
-                all_logs.append(f"=== SGLANG LOG FILE READ ERROR ===\n{str(e)}")
-                logger.error(f"Failed to read SGLang log file: {e}")
+                logger.debug(f"Failed to read SGLang log file: {e}")
             
-            # Then capture API endpoints  
-            logger.info("🔍 CAPTURING API ENDPOINT DATA...")
-            max_retries = 3
+            # Capture API endpoints for token usage
+            max_retries = 2
             for retry in range(max_retries):
                 try:
                     async with aiohttp.ClientSession(
-                        timeout=aiohttp.ClientTimeout(total=15, connect=5)
+                        timeout=aiohttp.ClientTimeout(total=10, connect=3)
                     ) as session:
-                        # Use only confirmed SGLang endpoints from OpenAPI spec
+                        # Essential SGLang endpoints for token usage
                         endpoints_to_try = [
-                            f"{base_url}/get_server_info",      # ✅ Confirmed - detailed server stats and load info
-                            f"{base_url}/get_model_info",       # ✅ Available - model information
-                            f"{base_url}/get_load",             # ✅ Available - current load/request stats
-                            f"{base_url}/health_generate",      # ✅ Available - health check that generates tokens
-                            f"{base_url}/v1/models",            # ✅ Available - OpenAI-compatible models endpoint
+                            f"{base_url}/get_server_info",      # Server stats and load info
+                            f"{base_url}/get_model_info",       # Model information
+                            f"{base_url}/get_load",             # Current load/request stats
+                            f"{base_url}/health_generate",      # Health check with tokens
+                            f"{base_url}/v1/models",            # Models endpoint
                         ]
                         
                         successful_endpoints = 0
                         
                         for endpoint in endpoints_to_try:
                             try:
-                                async with session.get(endpoint, timeout=10) as response:
+                                async with session.get(endpoint, timeout=5) as response:
                                     if response.status == 200:
                                         data = await response.text()
                                         all_logs.append(f"=== API ENDPOINT: {endpoint} ===\n{data}\n")
                                         successful_endpoints += 1
-                                        logger.info(f"📋 Captured {len(data)} characters from {endpoint}")
                                         
-                                        # Log a preview of potentially relevant data
-                                        if any(keyword in data.lower() for keyword in ['token', 'usage', 'prompt', 'completion', 'requests', 'processed']):
-                                            logger.info(f"🔍 Found token-related data in {endpoint}")
-                                            # Log first 300 chars that might contain token info
-                                            token_pos = data.lower().find('token')
-                                            if token_pos >= 0:
-                                                relevant_snippet = data[max(0, token_pos-50):token_pos+250]
-                                            else:
-                                                relevant_snippet = data[:300]
-                                            logger.info(f"📊 Token snippet from {endpoint}: {relevant_snippet}")
+                                        # Only log details in debug mode
+                                        if settings.debug and any(keyword in data.lower() for keyword in ['token', 'usage', 'load']):
+                                            logger.debug(f"Found token data in {endpoint}")
                                     else:
                                         logger.debug(f"Got {response.status} from {endpoint}")
-                            except asyncio.TimeoutError:
-                                logger.debug(f"Timeout accessing {endpoint}")
                             except Exception as e:
-                                logger.debug(f"Could not get logs from {endpoint}: {e}")
+                                logger.debug(f"Could not access {endpoint}: {e}")
                         
-                        if successful_endpoints > 0 or all_logs:  # Accept if we have system logs even if endpoints fail
+                        if successful_endpoints > 0 or all_logs:
                             combined_logs = "\n".join(all_logs)
-                            logger.info(f"📋 Total SGLang logs captured: {len(combined_logs)} characters from {successful_endpoints}/{len(endpoints_to_try)} endpoints + system logs")
+                            logger.info(f"📊 SGLang logs: {len(combined_logs)} chars from {successful_endpoints}/{len(endpoints_to_try)} endpoints")
                             return combined_logs
                         else:
                             if retry < max_retries - 1:
-                                logger.warning(f"No SGLang endpoints responded, retrying in 2 seconds... (attempt {retry + 1}/{max_retries})")
-                                await asyncio.sleep(2)
+                                logger.debug(f"No endpoints responded, retrying... ({retry + 1}/{max_retries})")
+                                await asyncio.sleep(1)
                                 continue
                             else:
                                 logger.warning(f"No SGLang endpoints responded after {max_retries} attempts")
@@ -578,15 +492,15 @@ class MinerUProcessor:
                                 
                 except aiohttp.ClientError as e:
                     if retry < max_retries - 1:
-                        logger.warning(f"SGLang connection failed, retrying... (attempt {retry + 1}/{max_retries}): {e}")
-                        await asyncio.sleep(2)
+                        logger.debug(f"SGLang connection failed, retrying... ({retry + 1}/{max_retries})")
+                        await asyncio.sleep(1)
                         continue
                     else:
-                        logger.warning(f"SGLang connection failed permanently: {e}")
+                        logger.warning(f"SGLang connection failed: {e}")
                         return "\n".join(all_logs) if all_logs else ""
                         
         except Exception as e:
-            logger.warning(f"Failed to capture SGLang server logs: {e}")
+            logger.debug(f"Failed to capture SGLang logs: {e}")
             return ""
 
     def _detect_model_name(self, stdout: str, stderr: str, options: ProcessingOptions) -> Optional[str]:
@@ -594,8 +508,6 @@ class MinerUProcessor:
         import re
         
         combined_logs = stdout + "\n" + stderr
-        
-        logger.debug(f"🔍 Attempting to detect model name from {len(combined_logs)} chars of logs")
         
         # Common model name patterns in logs (more comprehensive for SGLang)
         model_patterns = [
@@ -660,7 +572,7 @@ class MinerUProcessor:
             logger.info("🤖 Using default SGLang model: llama")
             return 'llama'
         
-        logger.debug("❓ Could not detect model name from logs or backend")
+        logger.debug("Could not detect model name from logs or backend")
         return None
         
     def _build_mineru_command(self, input_path: str, output_dir: str, options: ProcessingOptions) -> List[str]:
@@ -797,31 +709,48 @@ class MinerUProcessor:
                 logger.info("🚀 FRESH SGLang Server Logs (POST-PROCESSING):")
                 logger.info("=" * 100)
                 post_processing_logs = await self._capture_sglang_logs(options.sglang_url)
+                # 📊 Summarize SGLang logs instead of dumping everything
                 if post_processing_logs:
-                    # Split long logs and show them clearly
-                    for i, chunk in enumerate([post_processing_logs[i:i+2000] for i in range(0, len(post_processing_logs), 2000)]):
-                        logger.info(f"[CHUNK {i+1}] {chunk}")
+                    # Extract key metrics instead of showing all logs
+                    post_log_lines = post_processing_logs.count('\n')
+                    post_requests = post_processing_logs.count('POST /generate')
+                    post_prefills = post_processing_logs.count('Prefill batch')
+                    post_decodes = post_processing_logs.count('Decode batch')
+                    logger.info(f"📊 Fresh SGLang logs: {post_log_lines} lines, {post_requests} requests, {post_prefills} prefills, {post_decodes} decodes")
+                    
+                    # Only show detailed logs in debug mode
+                    if settings.debug:
+                        logger.debug("🔍 Detailed fresh SGLang logs:")
+                        for i, chunk in enumerate([post_processing_logs[i:i+1000] for i in range(0, len(post_processing_logs), 1000)]):
+                            logger.debug(f"[CHUNK {i+1}] {chunk[:500]}...")
                 else:
-                    logger.info("❌ NO FRESH SGLANG LOGS CAPTURED")
-                logger.info("=" * 100)
+                    logger.info("❌ No fresh SGLang logs captured")
                 
                 if sglang_logs:
-                    logger.info("🔄 PRE-PROCESSING SGLang Server Logs:")
-                    logger.info("=" * 100)
-                    for i, chunk in enumerate([sglang_logs[i:i+2000] for i in range(0, len(sglang_logs), 2000)]):
-                        logger.info(f"[PRE-CHUNK {i+1}] {chunk}")
-                    logger.info("=" * 100)
+                    # Extract key metrics from pre-processing logs
+                    pre_log_lines = sglang_logs.count('\n')
+                    pre_requests = sglang_logs.count('POST /generate')
+                    pre_prefills = sglang_logs.count('Prefill batch')
+                    pre_decodes = sglang_logs.count('Decode batch')
+                    logger.info(f"📊 Pre-processing SGLang logs: {pre_log_lines} lines, {pre_requests} requests, {pre_prefills} prefills, {pre_decodes} decodes")
+                    
+                    # Only show detailed logs in debug mode
+                    if settings.debug:
+                        logger.debug("🔍 Detailed pre-processing SGLang logs:")
+                        for i, chunk in enumerate([sglang_logs[i:i+1000] for i in range(0, len(sglang_logs), 1000)]):
+                            logger.debug(f"[PRE-CHUNK {i+1}] {chunk[:500]}...")
                 else:
-                    logger.info("❌ NO PRE-PROCESSING SGLANG LOGS")
+                    logger.info("❌ No pre-processing SGLang logs")
             
-            # 🧮 Parse token usage from all available logs
+            # 🧮 Detect model name and parse token usage from all available logs
             logger.info("🧮 Parsing token usage from logs...")
-            token_usage = parse_token_usage_from_logs(stdout, stderr, model_name)
+            detected_model_name = self._detect_model_name(stdout, stderr, options)
+            token_usage = parse_token_usage_from_logs(stdout, stderr, detected_model_name)
             
             # Also try to parse token usage from captured SGLang logs
             if sglang_logs:
                 logger.info(f"🔍 Attempting to parse token usage from {len(sglang_logs)} characters of SGLang logs")
-                sglang_token_usage = parse_token_usage_from_logs("", sglang_logs, model_name)
+                sglang_token_usage = parse_token_usage_from_logs("", sglang_logs, detected_model_name)
                 
                 # If we found token usage in SGLang logs but not in stdout/stderr, use SGLang data
                 if sglang_token_usage and not token_usage:
@@ -877,11 +806,11 @@ class MinerUProcessor:
         image_files = {}  # Store image files as base64
         
         try:
-            # Log all files in output directory for debugging
+            # Summary of files in output directory
             all_files = list(output_dir.rglob("*"))
-            logger.info(f"Files in output directory {output_dir}:")
-            for file in all_files:
-                logger.info(f"  {file.relative_to(output_dir)} ({'dir' if file.is_dir() else 'file'})")
+            file_count = len([f for f in all_files if f.is_file()])
+            dir_count = len([f for f in all_files if f.is_dir()])
+            logger.info(f"📁 Output directory: {file_count} files, {dir_count} directories")
             
             # Look for MinerU output files (typically JSON and markdown)
             json_files = list(output_dir.rglob("*.json"))  # Use rglob to search subdirectories
@@ -913,11 +842,12 @@ class MinerUProcessor:
                                     "size": len(image_content),
                                     "path": str(file_path.relative_to(output_dir))
                                 }
-                                logger.info(f"Collected image file: {file_path.name} ({len(image_content)} bytes)")
                         except Exception as e:
                             logger.warning(f"Failed to read image file {file_path}: {e}")
                 
-                logger.info(f"Collected {len(image_files)} image files")
+                if image_files:
+                    total_size = sum(img["size"] for img in image_files.values())
+                    logger.info(f"📷 Collected {len(image_files)} images ({total_size // 1024}KB total)")
             
             # Parse middle.json output if available (preferred for structured data)
             if middle_json_files:
